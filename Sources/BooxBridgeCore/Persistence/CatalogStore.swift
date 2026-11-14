@@ -495,10 +495,14 @@ public final class CatalogStore: @unchecked Sendable {
                        bindings: [.integer(documentID), .text(title), .text(folder), .text(body)])
     }
 
-    public struct SearchHit: Equatable, Sendable {
+    /// One FTS match. notes_fts rowid == documentID, so hits are unique per
+    /// document; Identifiable by documentID for SwiftUI lists.
+    public struct SearchHit: Equatable, Sendable, Identifiable {
         public let documentID: Int64
         public let title: String
         public let snippet: String
+
+        public var id: Int64 { documentID }
     }
 
     public func search(matching phrase: String, limit: Int = 50) throws -> [SearchHit] {

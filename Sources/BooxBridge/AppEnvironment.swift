@@ -91,7 +91,7 @@ final class AppEnvironment {
         self.credentials = KeychainCredentialStore()
         self.clock = SystemClock()
         let catalogURL = supportDirectory.appendingPathComponent("catalog.sqlite")
-        self.catalog = try CatalogStore.open(atPath: catalogURL)
+        self.catalog = try CatalogStore.open(atPath: catalogURL.path)
         self.storage = try ManagedStorage(rootURL: supportDirectory.appendingPathComponent("library", isDirectory: true))
         self.renderer = PDFKitPageRenderer(storage: storage)
         self.profiles = Self.loadProfiles(from: supportDirectory) ?? []
@@ -316,7 +316,7 @@ final class AppEnvironment {
             appendActivity(title: "OCR not started", detail: "No provider profile configured (Settings → Providers).")
             return
         }
-        guard let key = try? credentials.secret(forProfileID: profile.id), key?.isEmpty == false else {
+        guard let key = try? credentials.secret(forProfileID: profile.id), key.isEmpty == false else {
             appendActivity(title: "OCR not started", detail: "No API key stored for \(profile.displayName).")
             return
         }
@@ -390,7 +390,7 @@ final class AppEnvironment {
 
     func hasStoredKey(for profileID: String) -> Bool {
         guard let key = try? credentials.secret(forProfileID: profileID) else { return false }
-        return !(key ?? "").isEmpty
+        return !key.isEmpty
     }
 
     // MARK: - Settings

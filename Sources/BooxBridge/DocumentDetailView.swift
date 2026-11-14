@@ -4,6 +4,13 @@
 import BooxBridgeCore
 import PDFKit
 import SwiftUI
+import UniformTypeIdentifiers
+
+// System-declared UTType.markdown arrives with OS 27; the 26.1 floor needs
+// this imported declaration so export panels offer the real Markdown type.
+extension UTType {
+    static let markdown = UTType(importedAs: "net.daringfireball.markdown", conformingTo: .plainText)
+}
 
 struct DocumentDetailView: View {
     @Environment(AppEnvironment.self) private var app
@@ -29,7 +36,7 @@ struct DocumentDetailView: View {
     private func content(_ document: DocumentSummary) -> some View {
         let pages = app.pages(revisionID: document.currentPageRevisionID)
         let revisionID = document.currentPageRevisionID
-        VStack(spacing: 0) {
+        return VStack(spacing: 0) {
             HSplitView {
                 previewPane(document: document, pages: pages)
                     .frame(minWidth: 300, maxWidth: .infinity)
@@ -162,7 +169,7 @@ struct DocumentDetailView: View {
     private func export(document: DocumentSummary, format: TranscriptFormat) {
         guard let text = app.exportText(documentID: document.id, format: format) else { return }
         let panel = NSSavePanel()
-        panel.allowedContentTypes = format == .markdown ? [.markdownText] : [.plainText]
+        panel.allowedContentTypes = format == .markdown ? [.markdown] : [.plainText]
         panel.nameFieldStringValue = document.title.replacingOccurrences(of: "/", with: "-") + "." + format.rawValue
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {

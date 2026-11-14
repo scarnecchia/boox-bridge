@@ -5,7 +5,7 @@
 import BooxBridgeCore
 import SwiftUI
 
-enum Section: String, CaseIterable, Identifiable {
+enum AppSection: String, CaseIterable, Identifiable {
     case library
     case deviceFiles
     case activity
@@ -30,7 +30,7 @@ enum Section: String, CaseIterable, Identifiable {
 
 struct RootView: View {
     @Environment(AppEnvironment.self) private var app
-    @State private var section: Section = .library
+    @State private var section: AppSection = .library
     @State private var selectedDocumentID: Int64?
 
     var body: some View {
@@ -38,7 +38,7 @@ struct RootView: View {
         NavigationSplitView {
             List(selection: $section) {
                 Section {
-                    ForEach(Section.allCases) { item in
+                    ForEach(AppSection.allCases) { item in
                         NavigationLink(value: item) {
                             Label(item.label, systemImage: item.systemImage)
                         }
@@ -63,7 +63,7 @@ struct RootView: View {
             .safeAreaInset(edge: .bottom) {
                 DeviceStatusFooter()
             }
-        } detail {
+        } detail: {
             switch section {
             case .library:
                 LibraryView(selectedDocumentID: $selectedDocumentID)
@@ -75,7 +75,7 @@ struct RootView: View {
         }
         .searchable(text: $app.searchText, prompt: "Search notes and transcripts")
         .onReceive(NotificationCenter.default.publisher(for: .booxNavigate)) { note in
-            if let raw = note.object as? String, let target = Section(rawValue: raw) {
+            if let raw = note.object as? String, let target = AppSection(rawValue: raw) {
                 section = target
             }
         }

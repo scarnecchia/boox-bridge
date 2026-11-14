@@ -85,7 +85,7 @@ struct LibraryView: View {
     private func confirmDelete(_ document: DocumentSummary) {
         // Library-only deletion: originals and revisions are retained, and
         // nothing is ever sent to the device.
-        NSWorkspace.shared.requestUserAttention(.criticalRequest)
+        NSApp.requestUserAttention(.criticalRequest)
         let alert = NSAlert()
         alert.messageText = "Remove “\(document.title)” from the library?"
         alert.informativeText = "The original file and its revisions stay on this Mac. Nothing is deleted from the Boox."

@@ -31,8 +31,7 @@ struct ScenarioServices {
                 transport: transport, enrolledRoots: [], serial: serial,
                 devicePhase: .noDevice, initialActivity: [])
         case .libraryWorkflow:
-            let seeded = seedLibrary(in: supportDirectory)
-            _ = seeded
+            seedLibrary(in: supportDirectory)
             return ScenarioServices(
                 transport: transport,
                 enrolledRoots: [ImportRoot(id: "r1", serial: serial, remoteRoot: root,
@@ -115,7 +114,7 @@ final class ScenarioDeviceTransport: DeviceTransport, @unchecked Sendable {
     }
 
     func listEntries(root: RemotePath, serial: String) throws -> [RemoteFileRecord] {
-        listFiles(root: root, serial: serial)
+        try listFiles(root: root, serial: serial)
     }
 
     func stat(remote: RemotePath, serial: String) throws -> RemoteFileRecord? {
@@ -141,7 +140,7 @@ final class ScenarioDeviceTransport: DeviceTransport, @unchecked Sendable {
     }
 
     func push(localFile: URL, toRemote: RemotePath, serial: String) throws {
-        try FileManager.default.contents(atPath: localFile.path).map { data in
+        FileManager.default.contents(atPath: localFile.path).map { data in
             lock.lock(); defer { lock.unlock() }
             files[toRemote.raw] = data
         }

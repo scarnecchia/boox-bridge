@@ -100,11 +100,11 @@ final class PDFKitPageRenderer: PageRendering {
     }
 
     static func render(page: PDFPage, maxDimension: CGFloat) throws -> Data {
-        var bounds = page.bounds(for: .mediaBox)
-        // Crop box wins when present (scanner/export artifacts), and the
-        // rotation is applied so landscape notes come out right side up.
-        if let crop = page.cropBox, crop != .null { bounds = crop }
-        let rotation = CGFloat(page.rotationAngle)
+        // Crop box wins over the media box (scanner/export artifacts);
+        // PDFKit falls back to the media box when no crop box is set.
+        // `rotation` is 0/90/180/270 and marks pages stored sideways.
+        let bounds = page.bounds(for: .cropBox)
+        let rotation = CGFloat(page.rotation)
         let width = bounds.width
         let height = bounds.height
         guard width > 0, height > 0 else {
@@ -136,7 +136,7 @@ final class PDFKitPageRenderer: PageRendering {
             ctx.rotate(by: rotation * .pi / 180)
             ctx.translateBy(x: -bounds.midX, y: -bounds.midY)
         }
-        page.draw(with: .mediaBox, to: ctx)
+        page.draw(with: .cropBox, to: ctx)
 
         guard let image = ctx.makeImage(),
               let rep = NSBitmapImageRep(cgImage: image),

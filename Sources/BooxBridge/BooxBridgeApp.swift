@@ -25,7 +25,7 @@ struct BooxBridgeApp: App {
         WindowGroup {
             Group {
                 if let environment {
-                    RootView(environment: environment)
+                    RootView()
                         .environment(environment)
                 } else if let bootError {
                     ContentUnavailableView("Boox Bridge could not start",
@@ -50,7 +50,7 @@ struct BooxBridgeApp: App {
             CommandMenu("Go") {
                 Button("Library") { NotificationCenter.default.post(name: .booxNavigate, object: "library") }
                     .keyboardShortcut("1", modifiers: [.command])
-                Button("Device Files") { NotificationCenter.default.post(name: .booxNavigate, object: "device") }
+                Button("Device Files") { NotificationCenter.default.post(name: .booxNavigate, object: "deviceFiles") }
                     .keyboardShortcut("2", modifiers: [.command])
                 Button("Activity") { NotificationCenter.default.post(name: .booxNavigate, object: "activity") }
                     .keyboardShortcut("3", modifiers: [.command])
@@ -79,8 +79,9 @@ struct BooxBridgeApp: App {
                 environment = try AppEnvironment(supportDirectory: temp, scenario: scenario)
             } else {
                 let support = try AppPaths.applicationSupport()
-                environment = try AppEnvironment(supportDirectory: support, scenario: nil)
-                environment.startDeviceMonitoring()
+                let env = try AppEnvironment(supportDirectory: support, scenario: nil)
+                environment = env
+                env.startDeviceMonitoring()
             }
         } catch {
             bootError = String(describing: error)
