@@ -2,15 +2,6 @@ import Foundation
 import Testing
 @testable import BooxBridgeCore
 
-// Regression coverage for the Activity history query. Job history used to be
-// rebuilt from the library's CURRENTLY FOLDER-FILTERED documents and sorted
-// by the immutable job id, so selecting a library folder hid terminal
-// failures in other folders, and a retried job (same row, reset) could have
-// its newest outcome pushed outside the 50-row cap by jobs with newer ids.
-// CatalogStore.terminalJobs(limit:) reads the store directly: terminal jobs
-// of current revisions of live documents only, newest first by LAST UPDATE
-// with the job id as tiebreak, capped.
-
 @Suite struct TerminalJobsTests {
     private func seedDocument(
         _ catalog: CatalogStore, path: String, folder: String, at date: Date
@@ -157,7 +148,6 @@ import Testing
         }
     }
 
-    /// Equal update times tie-break on job id, newest id first.
     @Test func equalUpdateTimeTiebreaksOnJobID() throws {
         try withTempDirectory { dir in
             let catalog = try CatalogStore.open(atPath: dir.appendingPathComponent("c.sqlite").path)

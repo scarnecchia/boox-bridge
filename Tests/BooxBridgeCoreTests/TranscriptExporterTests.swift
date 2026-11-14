@@ -2,15 +2,7 @@ import Foundation
 import Testing
 @testable import BooxBridgeCore
 
-// Regression coverage for export authority. A page the user edited is
-// exported from its persisted effective text, even when the user cleared
-// it. Before the fix, an empty effective text always fell back to the raw
-// OCR transcription, so a deliberately emptied page resurrected text the
-// user had explicitly deleted.
-
 @Suite struct TranscriptExporterTests {
-    /// An intentionally emptied edit (effective text cleared, edited_at
-    /// set) must export as empty — never as the raw OCR fallback.
     @Test func intentionallyEmptiedPageExportsAsEmpty() throws {
         let exporter = TranscriptExporter()
         let cleared = PageTranscript(
@@ -24,9 +16,6 @@ import Testing
         #expect(!markdown.contains("raw ocr text"))
     }
 
-    /// A page never edited by the user keeps the fallback to raw OCR while
-    /// its effective text is still empty — the export is not blank just
-    /// because no edit exists yet.
     @Test func neverEditedPageStillFallsBackToRawOCR() throws {
         let exporter = TranscriptExporter()
         let untouched = PageTranscript(
@@ -37,9 +26,6 @@ import Testing
         #expect(text.contains("raw ocr text"))
     }
 
-    /// A non-empty edit wins over the raw transcription — the rule the
-    /// emptied case extends, kept explicit here so the authority contract
-    /// for edited pages lives in one place.
     @Test func editedPageExportsPersistedTextOverRaw() throws {
         let exporter = TranscriptExporter()
         let edited = PageTranscript(
