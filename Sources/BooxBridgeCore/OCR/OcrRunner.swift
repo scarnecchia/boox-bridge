@@ -141,6 +141,15 @@ public actor OcrRunner {
     /// task stops scheduling new pages and aborts in-flight work where the
     /// transport allows; a request already sent may still have been billed,
     /// which the UI must disclose.
+    ///
+    /// Consent fidelity: the job row persists the exact (profile, model,
+    /// prompt-version) tuple the user approved at enqueue time. The profile
+    /// is the LIVE side of that tuple — its base URL and API key are
+    /// rotatable credentials and are always read at execution — but the
+    /// MODEL and PROMPT must come from the job, not from whatever the
+    /// profile currently points at. Otherwise a paused queue resumed after
+    /// a provider-settings edit would transcribe pages under settings the
+    /// user never approved while history still names the old model.
     public func drain(
         profileResolver: @Sendable (_ profileID: String) -> ProviderProfile?
     ) async {
@@ -153,10 +162,28 @@ public actor OcrRunner {
                 )
                 continue
             }
+            guard !job.modelID.isEmpty else {
+                try? catalog.updateJob(
+                    id: job.id, state: .failed, attempts: job.attempts + 1,
+                    lastError: "queued job has no model recorded — re-enqueue the page", at: clock.now()
+                )
+                continue
+            }
+            guard let prompt = Self.prompt(for: job) else {
+                try? catalog.updateJob(
+                    id: job.id, state: .failed, attempts: job.attempts + 1,
+                    lastError: "queued prompt version \(job.promptVersion) is not supported by this build — re-enqueue the page", at: clock.now()
+                )
+                continue
+            }
+            // The job's stored model wins over the profile's current one;
+            // everything else (endpoint, key, adapter kind) stays live.
+            var effectiveProfile = profile
+            effectiveProfile.modelID = job.modelID
             try? catalog.updateJob(
                 id: job.id, state: .running, attempts: job.attempts, lastError: nil, at: clock.now()
             )
-            let outcome = await execute(job: job, profile: profile)
+            let outcome = await execute(job: job, profile: effectiveProfile, prompt: prompt)
             switch outcome {
             case .succeeded:
                 continue
@@ -289,6 +316,18 @@ public actor OcrRunner {
                 reason: error.localizedDescription
             )
         }
+    }
+
+    /// Resolve the prompt text a queued job consented to. The job row pins
+    /// only the version NUMBER; the text is supplied by this build. A job
+    /// queued under a version this build does not know must never be
+    /// executed with a different prompt silently — that would process the
+    /// user's page under terms they never approved — so it returns nil and
+    /// the drain fails the job closed; re-enqueueing is a fresh, explicit
+    /// consent under the current prompt.
+    private static func prompt(for job: OcrJob) -> String? {
+        guard job.promptVersion == PromptVersion.current else { return nil }
+        return PromptVersion.text
     }
 
     private func checkRevisionFresh(job: OcrJob) throws {

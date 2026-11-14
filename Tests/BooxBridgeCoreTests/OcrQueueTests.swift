@@ -134,6 +134,74 @@ struct FixedRenderer: PageRendering {
         }
     }
 
+    /// Consent fidelity: a queued job was approved under the (profile,
+    /// model, prompt) tuple persisted on its row. Editing the provider's
+    /// model while the queue is paused must not silently retarget queued
+    /// pages: the executed request must carry the job's STORED model, even
+    /// though the profile object handed to the drain names a different one.
+    /// The endpoint is the live-credential half of the profile and follows
+    /// the edit — asserted here so both halves of the contract are pinned.
+    @Test func drainedJobExecutesStoredModelAgainstLiveEndpoint() async throws {
+        try await withTempDirectoryAsync { dir in
+            let transport = ScriptedTransport()
+            let (catalog, runner, credentials) = try makeFixture(transport: transport, directory: dir)
+            try credentials.saveSecret("k-1", forProfileID: "p1")
+            let (_, revisionID) = try seedDocument(catalog: catalog)
+            _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
+                                       modelID: "m-consented", promptVersion: PromptVersion.current, at: Date())
+
+            // Queue paused: the user edits the provider to a different model
+            // AND endpoint before resuming. (Immutable: Swift 6 forbids
+            // capturing a var in the @Sendable resolver closure.)
+            let edited = ProviderProfile(id: "p1", displayName: "P", kind: .openAI,
+                                         baseURL: URL(string: "https://api.example.com/edited")!, modelID: "m-current")
+
+            transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"page text"}]}]}"#.utf8)))
+            await runner.drain(profileResolver: { _ in edited })
+
+            #expect(transport.recorded.count == 1)
+            let wire = try #require(transport.recorded.first)
+            let body = try #require(JSONSerialization.jsonObject(with: wire.body) as? [String: Any])
+            #expect(body["model"] as? String == "m-consented")
+            // Prompt identity also comes from the job row (its stored
+            // version resolves to the current prompt text).
+            let input = try #require(body["input"] as? [[String: Any]])
+            let parts = try #require(input.first?["content"] as? [[String: Any]])
+            #expect(parts.first?["text"] as? String == PromptVersion.text)
+            // Endpoint and key are live credentials: they follow the edit.
+            #expect(wire.url.hasSuffix("/edited/responses"))
+            #expect(wire.headers["Authorization"] == "Bearer k-1")
+
+            let job = try catalog.jobs(revisionID: revisionID).first!
+            #expect(job.state == .succeeded)
+        }
+    }
+
+    /// The job row pins the prompt VERSION number; this build supplies the
+    /// text. A job queued under a version this build does not know must
+    /// fail closed — executing it with a different prompt would process
+    /// the page under terms the user never approved. Re-enqueueing is the
+    /// explicit fresh consent.
+    @Test func unknownQueuedPromptVersionFailsClosedWithoutNetworkCall() async throws {
+        try await withTempDirectoryAsync { dir in
+            let transport = ScriptedTransport()
+            let (catalog, runner, credentials) = try makeFixture(transport: transport, directory: dir)
+            try credentials.saveSecret("k-1", forProfileID: "p1")
+            let profile = ProviderProfile(id: "p1", displayName: "P", kind: .openAI,
+                                          baseURL: URL(string: "https://api.example.com/v1")!, modelID: "m")
+            let (_, revisionID) = try seedDocument(catalog: catalog)
+            _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
+                                       modelID: "m", promptVersion: PromptVersion.current + 1, at: Date())
+
+            await runner.drain(profileResolver: { _ in profile })
+
+            #expect(transport.recorded.isEmpty)
+            let job = try catalog.jobs(revisionID: revisionID).first!
+            #expect(job.state == .failed)
+            #expect(job.lastError?.contains("prompt version") == true)
+        }
+    }
+
     @Test func missingKeyFailsVisiblyWithoutNetworkCall() async throws {
         try await withTempDirectoryAsync { dir in
             let transport = ScriptedTransport()
