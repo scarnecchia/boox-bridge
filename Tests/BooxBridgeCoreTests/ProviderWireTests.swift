@@ -380,28 +380,57 @@ final class ReplyServer: @unchecked Sendable {
 /// Serial on purpose: Linux FoundationNetworking can fail to start a
 /// session's transfer when several sessions begin transfers at once, so
 /// these transport tests run one at a time.
-/// Bounds a hang-prone network await so a stalled transport fails the test
-/// loudly instead of wedging the whole runner.
-private struct WatchdogTimeout: Error, CustomStringConvertible {
-    let seconds: TimeInterval
-    var description: String { "operation exceeded \(seconds)s watchdog" }
+/// Shared flag letting the detached watchdog tell "operation finished"
+/// from "operation wedged" once its timer fires.
+private final class WatchdogSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+
+    func finish() {
+        lock.lock()
+        finished = true
+        lock.unlock()
+    }
+
+    var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finished
+    }
 }
 
+/// Bounds a hang-prone network await so a stalled transport fails the test
+/// loudly instead of wedging the whole runner. The watchdog must stay
+/// UNSTRUCTURED: as a task-group timer it was a sibling of the guarded
+/// operation, so when a stranded continuation never resumed, the timer
+/// won but the group still awaited the hung child — the runner wedged
+/// forever instead of reporting a failure. A detached task instead records
+/// the failure and, because a wedged test can never return on its own,
+/// escalates to a nonzero process exit, the only failure signal that can
+/// escape the wedge.
 private func withWatchdog<T: Sendable>(_ seconds: TimeInterval,
                                        _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { try await operation() }
-        group.addTask {
-            try await Task.sleep(for: .seconds(seconds))
-            throw WatchdogTimeout(seconds: seconds)
-        }
-        let first = try await group.next()!
-        group.cancelAll()
-        // Drain the loser; its (cancellation or timeout) error must not
-        // mask the winning result.
-        while (try? await group.next()) != nil {}
-        return first
+    let signal = WatchdogSignal()
+    let watchdog = Task.detached(priority: .userInitiated) {
+        try? await Task.sleep(for: .seconds(seconds))
+        if signal.isFinished { return }
+        // Short grace so a completion racing the deadline is not misjudged.
+        try? await Task.sleep(for: .milliseconds(500))
+        guard !signal.isFinished else { return }
+        Issue.record("operation exceeded its \(seconds)s watchdog; a stranded continuation is wedging this test")
+        // Give the runner a moment to flush the recorded issue, then break
+        // the wedge: a test that can never return only fails by process exit.
+        usleep(500_000)
+        FileHandle.standardError.write(Data(
+            "watchdog: operation exceeded \(seconds)s; exiting nonzero so a stranded continuation cannot wedge the test runner\n".utf8
+        ))
+        exit(2)
     }
+    defer {
+        signal.finish()
+        watchdog.cancel()
+    }
+    return try await operation()
 }
 
 @Suite(.serialized)
