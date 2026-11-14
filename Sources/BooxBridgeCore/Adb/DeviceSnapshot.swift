@@ -1,8 +1,4 @@
 // pattern: Functional Core
-// Parser for `adb devices -l` output. Pure — fed raw text, returns
-// structured device state. Emulator and network transports are marked so
-// USB auto-import can refuse them; the transport id plus serial is what
-// user-facing selection uses.
 
 import Foundation
 
@@ -53,7 +49,6 @@ public enum DeviceListParser {
         for line in text.split(separator: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty, trimmed != "List of devices attached" else { continue }
-            // Header lines from daemon starts ("* daemon not running...") are skipped.
             if trimmed.hasPrefix("*") { continue }
             let fields = trimmed.split(separator: " ", omittingEmptySubsequences: true)
             guard fields.count >= 2 else { continue }

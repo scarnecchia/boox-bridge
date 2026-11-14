@@ -1,5 +1,3 @@
-// credentialIsolationIntegration — REAL Keychain round-trip plus
-// catalog/log assertions that secrets never leave the key store.
 
 import BooxBridgeCore
 import XCTest
@@ -12,15 +10,12 @@ final class CredentialIsolationTests: XCTestCase {
         let secret = "sk-integration-\(UUID().uuidString)"
         defer { try? store.deleteSecret(forProfileID: profileID) }
 
-        // Round-trip through the REAL Keychain.
         try store.saveSecret(secret, forProfileID: profileID)
         XCTAssertEqual(try store.secret(forProfileID: profileID), secret)
 
-        // Update-in-place overwrites, not duplicates.
         try store.saveSecret("sk-rotated", forProfileID: profileID)
         XCTAssertEqual(try store.secret(forProfileID: profileID), "sk-rotated")
 
-        // Delete removes; missing reads are nil, not errors.
         try store.deleteSecret(forProfileID: profileID)
         XCTAssertNil(try store.secret(forProfileID: profileID))
 
@@ -57,7 +52,6 @@ final class CredentialIsolationTests: XCTestCase {
         XCTAssertNil(all.range(of: needle), "secret must never appear in the catalog database")
         XCTAssertEqual(reason, "bad request with \(Redaction.placeholder) inside")
 
-        // UserDefaults must not carry it either.
         let defaultsDump = UserDefaults.standard.dictionaryRepresentation()
         for (_, value) in defaultsDump {
             if case .some(let s) = value as? String {

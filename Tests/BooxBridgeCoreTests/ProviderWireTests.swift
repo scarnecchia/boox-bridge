@@ -1,4 +1,3 @@
-// providerWireContractFixtures + endpointSecurityFixtures.
 import Foundation
 import Testing
 @testable import BooxBridgeCore
@@ -13,7 +12,6 @@ import Testing
         )
     }
 
-    // -- providerWireContractFixtures --------------------------------------
 
     @Test func openAIResponsesContract() throws {
         let wire = try request(ProviderPresets.openAI)
@@ -35,7 +33,7 @@ import Testing
         #expect(image["type"] as! String == "input_image")
         let url = image["image_url"] as! String
         #expect(url.hasPrefix("data:image/png"))
-        #expect(url.contains("detail=high")) // preset detail hint applied
+        #expect(url.contains("detail=high"))
         #expect(url.contains(png.base64EncodedString()))
     }
 
@@ -73,24 +71,19 @@ import Testing
             #expect(content[0]["type"] as! String == "text")
             let image = content[1]["image_url"] as! [String: Any]
             #expect((image["url"] as! String).hasPrefix("data:image/png;base64,"))
-            // No tools/function fields are ever sent.
             #expect(json["tools"] == nil)
             #expect(json["functions"] == nil)
         }
     }
 
     @Test func responseDecodingPerKind() throws {
-        // OpenAI Responses shape.
         let openAI = #"{"output":[{"content":[{"type":"output_text","text":"hello notes"}]}]}"#
         #expect(try ProviderWire.decodeTranscription(kind: .openAI, body: Data(openAI.utf8)) == "hello notes")
-        // Anthropic shape.
         let anthropic = #"{"content":[{"type":"text","text":"line one"},{"type":"text","text":"line two"}]}"#
         #expect(try ProviderWire.decodeTranscription(kind: .anthropic, body: Data(anthropic.utf8)) == "line one\nline two")
-        // OpenAI-compatible shape.
         let chat = #"{"choices":[{"message":{"content":"body text"}}]}"#
         #expect(try ProviderWire.decodeTranscription(kind: .openAICompatible, body: Data(chat.utf8)) == "body text")
 
-        // Empty and malformed are NEVER reported as successful empty OCR.
         #expect(throws: WireError.emptyTranscription.self) {
             _ = try ProviderWire.decodeTranscription(kind: .openAI, body: Data(#"{"output":[]}"#.utf8))
         }
@@ -100,15 +93,12 @@ import Testing
         #expect(throws: WireError.emptyResponse.self) {
             _ = try ProviderWire.decodeTranscription(kind: .openAICompatible, body: Data())
         }
-        // Error bodies surface their message.
         #expect(throws: WireError.malformedResponse("provider error: bad model")) {
             _ = try ProviderWire.decodeTranscription(kind: .openAICompatible, body: Data(#"{"error":{"message":"bad model"}}"#.utf8))
         }
     }
 
     @Test func promptIsTranscriptionInputOnly() {
-        // The prompt text never injects tool/system semantics; it asks for a
-        // faithful transcription and marks unreadable writing.
         #expect(PromptVersion.text.contains("Transcribe"))
         #expect(PromptVersion.text.contains("[unreadable]"))
         #expect(!PromptVersion.text.lowercased().contains("ignore previous"))
@@ -116,7 +106,6 @@ import Testing
 }
 
 @Suite struct EndpointSecurityTests {
-    // -- endpointSecurityFixtures -------------------------------------------
 
     @Test func httpsEndpointsAllowed() {
         #expect(EndpointPolicy.validate(url: URL(string: "https://api.openai.com/v1")!) == .allowed)
@@ -144,7 +133,6 @@ import Testing
         if case .rejected = EndpointPolicy.validate(url: URL(string: "https://api.example.com/v1?access_token=abc")!) {} else {
             Issue.record("token in query must be rejected")
         }
-        // Benign queries are fine.
         #expect(EndpointPolicy.validate(url: URL(string: "https://api.example.com/v1?verbose=true")!) == .allowed)
     }
 
@@ -153,7 +141,6 @@ import Testing
         #expect(EndpointPolicy.redirectAllowed(from: original, to: URL(string: "https://api.example.com/v2/chat")!))
         #expect(!EndpointPolicy.redirectAllowed(from: original, to: URL(string: "https://evil.example.net/v1")!))
         #expect(!EndpointPolicy.redirectAllowed(from: original, to: URL(string: "http://api.example.com/v1")!))
-        // Host is case-insensitive; scheme must be https on the target.
         #expect(EndpointPolicy.redirectAllowed(from: original, to: URL(string: "https://API.Example.Com/v2")!))
     }
 }

@@ -1,7 +1,4 @@
 // pattern: Functional Core (sniffer + limits) / Imperative Shell (seam)
-// Document format policy: magic-byte sniffing and bounded-size rules are
-// pure; actual page counting/rendering is platform work behind the
-// DocumentValidating seam (PDFKit adapter lives in the macOS app target).
 
 import Foundation
 

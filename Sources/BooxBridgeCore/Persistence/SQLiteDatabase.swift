@@ -1,8 +1,5 @@
+
 // pattern: Imperative Shell
-// Minimal SQLite3 wrapper over the CBooxSQLite system library. All access
-// is serialized behind a lock; statements are prepared per call and
-// finalized deterministically. This is the only file in the package that
-// touches the sqlite3 C API.
 
 import CBooxSQLite
 import Foundation
@@ -117,8 +114,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
-    // MARK: - Internals
-
     private func run(_ sql: String, bindings: [SQLiteValue], collectingRows: Bool) throws -> [[SQLiteValue]] {
         lock.lock()
         defer { lock.unlock() }
@@ -213,7 +208,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
                     throw SQLiteError.stepFailed(sql: sql, detail: String(cString: sqlite3_errmsg(db)))
                 }
             }
-            // Copy the tail while csql is still alive.
             outcome = StatementOutcome(rows: rows, remainingTail: tail.map { String(cString: $0) })
         }
         return outcome ?? StatementOutcome(rows: [], remainingTail: nil)

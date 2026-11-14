@@ -1,5 +1,3 @@
-// macOS-only harness tests. Anything requiring Accessibility permission
-// reports itself as BLOCKED (skip with reason), never as a pass.
 
 import BooxBridgeCore
 import PDFKit
@@ -11,10 +9,8 @@ final class AppSmokeAndHarnessTests: XCTestCase {
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     static let appBundleURL = repoRoot.appendingPathComponent("build/BooxBridge.app")
 
-    // -- buildAndBundleSmoke ------------------------------------------------
 
     func test_buildAndBundleSmoke() throws {
-        // Build the real bundle through the project's build path.
         let process = Process()
         process.currentDirectoryURL = Self.repoRoot
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -32,7 +28,6 @@ final class AppSmokeAndHarnessTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: Self.appBundleURL.appendingPathComponent("Contents/MacOS/BooxBridge").path))
 
-        // Hardened runtime must be enabled on the signed bundle.
         let codesign = Process()
         codesign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
         codesign.arguments = ["-dv", "--verbose=2", Self.appBundleURL.path]
@@ -44,7 +39,6 @@ final class AppSmokeAndHarnessTests: XCTestCase {
         XCTAssertEqual(codesign.terminationStatus, 0, "codesign -dv failed: \(detail)")
         XCTAssertTrue(detail.contains("CodeDirectory v="), "expected a modern code directory")
         XCTAssertTrue(detail.contains("runtime"), "hardened runtime flag missing from signature")
-        // No blanket library validation exception in the entitlements blob.
         let entitlements = Process()
         entitlements.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
         entitlements.arguments = ["-d", "--entitlements", ":-", Self.appBundleURL.path]
@@ -54,7 +48,6 @@ final class AppSmokeAndHarnessTests: XCTestCase {
         entitlements.waitUntilExit()
         let xml = String(data: entPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertFalse(xml.contains("disable-library-validation"), "blanket library validation exception must not be granted")
-        // Display name is Boox Bridge; identifier stays BooxBridge.
         let plist = Self.appBundleURL.appendingPathComponent("Contents/Info.plist")
         let info = try NSDictionary(contentsOf: plist, errorIfMissing: true) as? [String: Any]
         XCTAssertEqual(info?["CFBundleDisplayName"] as? String, "Boox Bridge")
@@ -62,7 +55,6 @@ final class AppSmokeAndHarnessTests: XCTestCase {
         XCTAssertEqual(info?["LSMinimumSystemVersion"] as? String, "26.1")
     }
 
-    // -- accessibilityHarnessPrerequisiteCheck --------------------------------
 
     func test_accessibilityHarnessPrerequisiteCheck() throws {
         let trusted = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
@@ -74,7 +66,6 @@ final class AppSmokeAndHarnessTests: XCTestCase {
         XCTAssertTrue(trusted)
     }
 
-    // -- scenarioIsolationIntegration + navigation/workflow scenarios -----------
 
     func launchScenario(_ name: String) throws -> (process: Process, terminated: @Sendable () -> Bool) {
         let executable = Self.appBundleURL.appendingPathComponent("Contents/MacOS/BooxBridge")
@@ -127,8 +118,7 @@ final class AppSmokeAndHarnessTests: XCTestCase {
     }
 
     func test_scenarioIsolationIntegration() throws {
-        // Scenario mode must not touch the real Application Support library:
-        // launch, then verify the user's catalog was not modified today.
+        // Scenario mode must not write to the user's catalog.
         let support = try AppPaths.applicationSupport(creating: false)
         let realCatalog = support.appendingPathComponent("catalog.sqlite")
         let before = (try? FileManager.default.attributesOfItem(atPath: realCatalog.path)[.modificationDate] as? Date)

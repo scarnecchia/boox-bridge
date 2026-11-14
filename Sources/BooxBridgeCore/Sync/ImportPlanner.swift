@@ -1,9 +1,4 @@
 // pattern: Functional Core
-// Import planning: diff a remote listing against catalog snapshots and
-// decide, per file, whether to pull. Pure — no I/O. An unchanged file (size
-// and mtime match the snapshot) is a no-op; anything else needs a pull that
-// may resolve to "new document", "new revision", or (via content-hash
-// equality at commit) "unchanged".
 
 import Foundation
 

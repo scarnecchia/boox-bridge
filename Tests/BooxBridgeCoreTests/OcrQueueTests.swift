@@ -1,11 +1,7 @@
-// ocrQueueIntegration, ocrRetryPolicy, staleResultIsolation,
-// imageCapabilityScenarios, credential isolation, transcript export.
 import Foundation
 import Testing
 @testable import BooxBridgeCore
 
-// A scriptable HTTP transport: records exact requests, plays scripted
-// responses, and supports per-request failures.
 final class ScriptedTransport: HTTPTransporting, @unchecked Sendable {
     struct Recorded: Equatable {
         let url: String
@@ -73,7 +69,6 @@ struct FixedRenderer: PageRendering {
         return (documentID, revisionID)
     }
 
-    // -- ocrQueueIntegration -------------------------------------------------
 
     @Test func queuePersistsAcrossReopenAndDeduplicates() async throws {
         try await withTempDirectoryAsync { dir in
@@ -97,7 +92,6 @@ struct FixedRenderer: PageRendering {
             transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"page text"}]}]}"#.utf8)))
             await runner.drain(profileResolver: { $0 == "p1" ? profile : nil })
 
-            // Success persisted: transcript recorded and searchable.
             let pages = try catalog.pages(revisionID: revisionID)
             #expect(pages[0].rawTranscription == "page text")
             #expect(pages[0].effectiveText == "page text")
@@ -105,7 +99,6 @@ struct FixedRenderer: PageRendering {
             let job = try catalog.job(id: firstJob!)!
             #expect(job.state == .succeeded)
 
-            // Reopen: no queued work remains; persisted results survive.
             let reopened = try CatalogStore.open(atPath: dir.appendingPathComponent("c.sqlite").path)
             #expect(try reopened.activeJobs().isEmpty)
             #expect(try reopened.pages(revisionID: revisionID)[0].effectiveText == "page text")
@@ -126,11 +119,9 @@ struct FixedRenderer: PageRendering {
                                        modelID: "m", promptVersion: 1, at: Date())
             await runner.drain(profileResolver: { _ in profile })
 
-            // User edits the page.
             let pages = try catalog.pages(revisionID: revisionID)
             try catalog.updateEffectiveText(pageID: pages[0].id, text: "my edited version", at: Date())
 
-            // Re-run OCR with a different model: raw updates, edit preserved.
             transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"raw two"}]}]}"#.utf8)))
             _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
                                        modelID: "m2", promptVersion: 1, at: Date())
@@ -153,7 +144,6 @@ struct FixedRenderer: PageRendering {
             _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
                                        modelID: "m", promptVersion: 1, at: Date())
             await runner.drain(profileResolver: { _ in profile })
-            // No request was ever sent; job failed with a clear reason.
             #expect(transport.recorded.isEmpty)
             #expect(try catalog.activeJobs().isEmpty)
             let job = try catalog.jobs(revisionID: revisionID).first!
@@ -173,7 +163,6 @@ struct FixedRenderer: PageRendering {
             let (_, revisionID) = try seedDocument(catalog: catalog)
             _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
                                        modelID: "m", promptVersion: 1, at: Date())
-            // Permanent 400 with a body that echoes the Authorization header.
             transport.enqueue(HTTPResponse(
                 status: 400,
                 body: Data("bad request with \(secret) inside".utf8)
@@ -185,7 +174,6 @@ struct FixedRenderer: PageRendering {
         }
     }
 
-    // -- staleResultIsolation --------------------------------------------------
 
     @Test func lateResultForOldRevisionIsDiscarded() async throws {
         try await withTempDirectoryAsync { dir in
@@ -198,7 +186,6 @@ struct FixedRenderer: PageRendering {
             _ = try catalog.enqueueJob(revisionID: revisionV1, pageIndex: 0, profileID: "p1",
                                        modelID: "m", promptVersion: 1, at: Date())
 
-            // While the job runs, a new revision becomes current.
             let samePath = try catalog.document(id: documentID)!.key.relativePath
             try catalog.commitImport(
                 key: DocumentKey(serial: "s", rootID: "r", relativePath: samePath),
@@ -210,25 +197,20 @@ struct FixedRenderer: PageRendering {
 
             let currentRevision = try catalog.currentRevisionID(documentID: documentID)!
             #expect(currentRevision != revisionV1)
-            // The stale job never sent a request at all…
             #expect(transport.recorded.isEmpty)
-            // …and no page of any revision received stale text.
             let newPage = try catalog.pages(revisionID: currentRevision)[0]
             #expect(newPage.rawTranscription.isEmpty)
             #expect(newPage.effectiveText.isEmpty)
-            // The stale job is terminal with an explicit reason.
             let job = try catalog.jobs(revisionID: revisionV1).first!
             #expect(job.state == .failed)
             #expect(job.lastError?.contains("no longer current") == true)
         }
     }
 
-    // -- ocrRetryPolicy ---------------------------------------------------------
 
     @Test func retryClassificationAndBounds() {
         let limits = RetryLimits(maxAttempts: 4, baseBackoffSeconds: 2, maxBackoffSeconds: 60, maxRetryAfterSeconds: 300)
 
-        // 429 with Retry-After honored and capped.
         if case .retryAfter(let d, _) = RetryPolicy.decide(status: 429, retryAfterHeader: "7", attempt: 0, limits: limits) {
             #expect(d == 7)
         } else { Issue.record("429 must retry") }
@@ -236,7 +218,6 @@ struct FixedRenderer: PageRendering {
             #expect(d == 300)
         } else { Issue.record("Retry-After must cap") }
 
-        // Transient 5xx: exponential, capped.
         if case .retryAfter(let d, _) = RetryPolicy.decide(status: 503, retryAfterHeader: nil, attempt: 0, limits: limits) {
             #expect(d == 2)
         } else { Issue.record("503 must retry") }
@@ -245,7 +226,6 @@ struct FixedRenderer: PageRendering {
             #expect(d == 60)
         } else { Issue.record("backoff must cap") }
 
-        // Permanent 4xx never retried.
         if case .fail = RetryPolicy.decide(status: 401, retryAfterHeader: nil, attempt: 0, limits: limits) {} else {
             Issue.record("401 must fail permanently")
         }
@@ -253,13 +233,11 @@ struct FixedRenderer: PageRendering {
             Issue.record("400 must fail permanently")
         }
 
-        // Attempt bound: no infinite retries even for retryable statuses.
         if case .fail = RetryPolicy.decide(status: 429, retryAfterHeader: "1", attempt: 4, limits: limits) {} else {
             Issue.record("attempts must be bounded")
         }
     }
 
-    // -- imageCapabilityScenarios -------------------------------------------------
 
     @Test func capabilityProbeScenarios() async throws {
         try await withTempDirectoryAsync { dir in
@@ -269,36 +247,30 @@ struct FixedRenderer: PageRendering {
             let profile = ProviderProfile(id: "p1", displayName: "P", kind: .openAICompatible,
                                           baseURL: URL(string: "https://api.example.com/v1")!, modelID: "vision-model")
 
-            // Verified on success.
             transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"choices":[{"message":{"content":"OK"}}]}"#.utf8)))
             #expect(await runner.probeImageCapability(profile: profile) == .verified)
 
-            // Auth failure is distinct from image-capability failure.
             try credentials.saveSecret("bad", forProfileID: "p1")
             transport.enqueue(HTTPResponse(status: 401, body: Data(#"{"error":{"message":"bad key"}}"#.utf8)))
             if case .rejected(let reason) = await runner.probeImageCapability(profile: profile) {
                 #expect(reason.contains("authentication"))
             } else { Issue.record("401 must reject as auth") }
 
-            // Image-unsupported model.
             transport.enqueue(HTTPResponse(status: 415, body: Data()))
             if case .rejected(let reason) = await runner.probeImageCapability(profile: profile) {
                 #expect(reason.contains("image"))
             } else { Issue.record("415 must reject as image-unsupported") }
 
-            // The probe sent ONLY the synthetic image, never a user page.
             let body = String(data: transport.recorded.last!.body, encoding: .utf8)!
             #expect(body.contains(SyntheticProbeImage.png.base64EncodedString()))
             #expect(body.contains(ProviderWire.syntheticTestPrompt))
 
-            // Missing key.
             let keyless = ProviderProfile(id: "nokey", displayName: "N", kind: .openAI,
                                           baseURL: URL(string: "https://api.example.com/v1")!, modelID: "m")
             if case .rejected(let reason) = await runner.probeImageCapability(profile: keyless) {
                 #expect(reason.contains("API key"))
             } else { Issue.record("missing key must reject") }
 
-            // Unsafe endpoint rejected before any network I/O.
             let unsafe = ProviderProfile(id: "p1", displayName: "U", kind: .openAI,
                                          baseURL: URL(string: "http://api.example.com/v1")!, modelID: "m")
             if case .rejected(let reason) = await runner.probeImageCapability(profile: unsafe) {
@@ -307,7 +279,6 @@ struct FixedRenderer: PageRendering {
         }
     }
 
-    // -- transcriptSearchExportIntegration (export half) ----------------------------
 
     @Test func transcriptExportPreservesOrderAndEdits() throws {
         let exporter = TranscriptExporter()
@@ -318,9 +289,10 @@ struct FixedRenderer: PageRendering {
                            effectiveText: "", lastEditedAt: nil),
         ]
         let text = exporter.export(title: "Meeting", pages: pages, format: .plainText)
-        #expect(text.contains("edited zero"))            // user edits preserved
-        #expect(!text.contains("raw zero"))              // …and take precedence
-        #expect(text.contains("page one"))               // unedited falls back to raw
+        // Edits take precedence; a page with no edit falls back to the raw transcription.
+        #expect(text.contains("edited zero"))
+        #expect(!text.contains("raw zero"))
+        #expect(text.contains("page one"))
         #expect(text.range(of: "Page 1")!.lowerBound < text.range(of: "Page 2")!.lowerBound)
 
         let md = exporter.export(title: "Meeting", pages: pages, format: .markdown)

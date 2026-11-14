@@ -1,7 +1,5 @@
 // pattern: Functional Core (seam declaration)
-// Page rendering seam. The macOS adapter renders revision pages to PNG via
-// PDFKit/CoreGraphics; tests inject deterministic bytes. The runner only
-// ever sends these LOCAL bytes — it never fetches provider-supplied URLs.
+// The runner sends only local image bytes; it never fetches provider-supplied URLs.
 
 import Foundation
 

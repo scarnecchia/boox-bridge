@@ -1,11 +1,4 @@
 // pattern: Functional Core
-// Remote (Android-side) path policy and adb shell argument quoting.
-//
-// The device shell is a real shell: any remote argument we interpolate into
-// `adb shell <cmd>` is shell syntax unless we quote it ourselves. Every
-// remote path passes through RemotePath validation (absolute, normalized,
-// no traversal, no NUL/newline) and is then single-quoted with POSIX
-// escaping before it reaches a command string.
 
 import Foundation
 

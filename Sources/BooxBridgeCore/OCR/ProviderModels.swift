@@ -1,6 +1,5 @@
 // pattern: Functional Core
-// Provider profiles and presets. API keys NEVER live here — profiles
-// reference a key stored in the credential store by profile id.
+// API keys never live here. Profiles reference a key stored by profile id.
 
 import Foundation
 

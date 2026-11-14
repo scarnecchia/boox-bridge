@@ -1,7 +1,4 @@
 // pattern: Functional Core
-// Key redaction for logs, errors, and diagnostics. Provider API keys must
-// never reach stderr, the catalog, or exception descriptions. Redaction is
-// applied defensively at every boundary that formats an error or log line.
 
 import Foundation
 

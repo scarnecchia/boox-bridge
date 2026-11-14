@@ -1,8 +1,5 @@
 // pattern: Functional Core
-// Shared platform shims for BooxBridgeCore. URLSession lives in
-// FoundationNetworking on non-Apple hosts; this import must stay the only
-// host-conditional in the library.
-
+// Keep this as the library's only host-conditional import.
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif

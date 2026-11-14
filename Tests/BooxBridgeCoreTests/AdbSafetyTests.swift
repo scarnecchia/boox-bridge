@@ -1,4 +1,3 @@
-// remotePathSafety and adbDiscoveryScenarios.
 import Foundation
 import Testing
 @testable import BooxBridgeCore
@@ -33,13 +32,10 @@ import Testing
     }
 
     @Test func quotingSurvivesHostileFilenames() {
-        // A filename containing a single quote must not break out of the
-        // remote command string.
         let hostile = "it's ; rm -rf /; $(reboot) `echo x` |xargs sh"
         let quoted = ShellQuoting.quote(hostile)
         #expect(quoted.hasPrefix("'"))
         #expect(quoted.hasSuffix("'"))
-        // Escaping pattern: ' -> '\'' closes/reopens the quote; content stays inert.
         #expect(quoted == "'it'\\''s ; rm -rf /; $(reboot) `echo x` |xargs sh'")
         #expect(ShellQuoting.quote("plain") == "'plain'")
         #expect(ShellQuoting.quote("üñí çø∂é.pdf") == "'üñí çø∂é.pdf'")
@@ -47,8 +43,6 @@ import Testing
 
     @Test func argvNeverGoesThroughAShellLocally() {
         let argv = AdbCommandBuilder.argv(for: .stat(remote: try! RemotePath("/sdcard/note/a b'.pdf"), serial: "78935a57"))
-        // The executable is never /bin/sh; arguments stay separate elements
-        // locally, with remote quoting embedded only in shell subcommands.
         #expect(argv.contains("-s"))
         #expect(argv.contains("78935a57"))
         let script = argv.first { $0.hasPrefix("stat") }!
@@ -74,8 +68,8 @@ import Testing
         data.append(record("7|2000|regular file", "/sdcard/note/ünï çø∂é \"quoted\".pdf"))
         data.append(record("9|3000|regular file", "/sdcard/note/-leading-hyphen.png"))
         data.append(record("8|4000|regular file", "/sdcard/note/new\nline.jpg"))
-        data.append(record("5|5000|regular file", "/sdcard/note/tab\tinside.pdf")) // tab INSIDE name: after first tab → legal
-        data.append(record("0|6000|directory", "/sdcard/note/subdir")) // filtered: not a regular file
+        data.append(record("5|5000|regular file", "/sdcard/note/tab\tinside.pdf"))
+        data.append(record("0|6000|directory", "/sdcard/note/subdir"))
         let parsed = try RemoteListingParser.parse(data, root: root)
         #expect(parsed.count == 5)
         #expect(parsed.allSatisfy { $0.isRegularFile })
@@ -86,15 +80,12 @@ import Testing
 
     @Test func listingParserRejectsAmbiguityAndTruncation() throws {
         let root = try RemotePath("/sdcard/note")
-        // No tab at all.
         #expect(throws: RemoteListingParser.ParseError.self) {
             _ = try RemoteListingParser.parse(Data("garbage".utf8 + [0]), root: root)
         }
-        // Trailing data without final NUL = truncated listing, not success.
         #expect(throws: RemoteListingParser.ParseError.truncatedListing) {
             _ = try RemoteListingParser.parse(Data("1|1|regular file\t/sdcard/note/a.pdf".utf8), root: root)
         }
-        // Path outside root fails the whole listing.
         #expect(throws: RemoteListingParser.ParseError.self) {
             _ = try RemoteListingParser.parse(Data("1|1|regular file\t/sdcard/other/x".utf8 + [0]), root: root)
         }
@@ -114,7 +105,6 @@ import Testing
 
     """
 
-    // -- adbDiscoveryScenarios -------------------------------------------
 
     @Test func parsesStatesTransportsAndProperties() {
         let devices = DeviceListParser.parse(sample)
@@ -138,28 +128,23 @@ import Testing
         let unauthorized = DeviceEntry(serial: "U1", state: .unauthorized, isEmulator: false, isNetwork: false, properties: [:])
         let offline = DeviceEntry(serial: "O1", state: .offline, isEmulator: false, isNetwork: false, properties: [:])
 
-        // Single USB candidate — emulators/network do not compete.
         if case .single(let pick) = DeviceListParser.usbCandidate([ready, emulator, network]) {
             #expect(pick.serial == "78935a57")
         } else { Issue.record("expected single USB candidate") }
 
-        // Ambiguity requires explicit user choice; no silent import.
         if case .ambiguous(let options) = DeviceListParser.usbCandidate([ready, DeviceEntry(serial: "ZZZ", state: .device, isEmulator: false, isNetwork: false, properties: [:])]) {
             #expect(options.count == 2)
         } else { Issue.record("expected ambiguous selection") }
         #expect(DeviceListParser.usbCandidate([ready, emulator]).requiresUserChoice == false)
 
-        // Unauthorized surfaces as an authorization explanation.
         if case .needsAuthorization(let d) = DeviceListParser.usbCandidate([unauthorized]) {
             #expect(d.state == .unauthorized)
         } else { Issue.record("expected needsAuthorization") }
 
-        // Offline/disconnected explanation.
         if case .disconnectedOrOffline = DeviceListParser.usbCandidate([offline]) {} else {
             Issue.record("expected disconnectedOrOffline")
         }
 
-        // Only emulators → none.
         if case .none = DeviceListParser.usbCandidate([emulator, network]) {} else {
             Issue.record("expected none for emulator/network only")
         }
@@ -167,7 +152,7 @@ import Testing
 
     @Test func networkSerialDetection() {
         #expect(DeviceListParser.isNetworkSerial("192.168.1.5:5555"))
-        #expect(DeviceListParser.isNetworkSerial("usb:1-3") == false) // colon but non-numeric port
+        #expect(DeviceListParser.isNetworkSerial("usb:1-3") == false)
         #expect(DeviceListParser.isNetworkSerial("78935a57") == false)
         #expect(DeviceListParser.isNetworkSerial("localhost:5555"))
     }

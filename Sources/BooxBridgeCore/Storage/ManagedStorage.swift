@@ -1,11 +1,4 @@
 // pattern: Imperative Shell
-// Managed storage layout under Application Support:
-//   <root>/blobs/ab/<sha256>       immutable originals, content-addressed
-//   <root>/staging/<uuid>/         per-run scratch for in-flight pulls
-//   <root>/previews/               generated thumbnails (cache, rebuildable)
-// Blob moves are atomic renames on the same volume; staging is scrubbed at
-// startup (no import survives an app relaunch) and never contains the only
-// copy of committed data.
 
 import Foundation
 

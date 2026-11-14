@@ -1,7 +1,5 @@
+
 // pattern: Functional Core
-// Retry classification for provider responses. Bounded exponential backoff
-// honoring Retry-After; permanent 4xx never retries; success is not decided
-// here (the caller decodes the body).
 
 import Foundation
 
@@ -67,7 +65,6 @@ public enum RetryPolicy {
         if let seconds = TimeInterval(header.trimmingCharacters(in: .whitespaces)) {
             return max(0, seconds)
         }
-        // HTTP-date form: approximate from remaining seconds; nil if unparsable.
         if let date = httpDate(header) {
             return max(0, date.timeIntervalSinceNow)
         }

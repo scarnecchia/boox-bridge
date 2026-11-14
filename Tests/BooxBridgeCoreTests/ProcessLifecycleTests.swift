@@ -1,6 +1,3 @@
-// adbProcessLifecycle: exercises the REAL FoundationProcessRunner with a
-// fixture executable — actual argv (no shell), stream capture, caps,
-// timeouts, nonzero exits, and cancellation cleanup.
 import Foundation
 import Testing
 @testable import BooxBridgeCore
@@ -45,15 +42,12 @@ import Testing
         #expect(result.succeeded)
         #expect(result.exitCode == 0)
         let lines = String(data: result.stdout, encoding: .utf8)!.split(separator: "\n").map(String.init)
-        // Arguments pass through as separate argv elements — the hostile
-        // string arrives as ONE line, un-mangled, because no shell joined them.
         #expect(lines == ["devices", "-l", "-s", "78935a57", "shell", hostile])
     }
 
     @Test func surfacesNonZeroExitAndStderr() async throws {
         let script = try fixtureScript("fail")
         let runner = FoundationProcessRunner()
-        // The runner REPORTS exit codes; policy decisions live in AdbClient.
         let result = try await runner.run(ProcessRequest(executable: script, arguments: [], timeout: 10))
         #expect(!result.succeeded)
         #expect(result.exitCode == 3)
@@ -105,7 +99,7 @@ import Testing
             _ = try AdbClient(executableURL: URL(fileURLWithPath: "/nonexistent/adb"))
         }
         #expect(throws: AdbClientError.self) {
-            _ = try AdbClient(executableURL: URL(fileURLWithPath: "/tmp")) // directory, not a file
+            _ = try AdbClient(executableURL: URL(fileURLWithPath: "/tmp"))
         }
     }
 }

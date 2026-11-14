@@ -1,11 +1,8 @@
-// corePlatformIsolation, sqliteFTSAvailability, minimumOSVersionChecks,
-// and FTS input-safety tests.
 import Foundation
 import Testing
 @testable import BooxBridgeCore
 
 @Suite struct PlatformPolicyTests {
-    // -- minimumOSVersionChecks -------------------------------------------
 
     @Test func minimumOSVersionChecks() {
         #expect(PlatformPolicy.isSupported(OSVersion(major: 26, minor: 1)))
@@ -14,7 +11,6 @@ import Testing
         #expect(!PlatformPolicy.isSupported(OSVersion(major: 26, minor: 0)))
         #expect(!PlatformPolicy.isSupported(OSVersion(major: 15, minor: 5)))
 
-        // 27.0 > 26.1 by major comparison, not a minor-string compare.
         #expect(OSVersion(major: 27, minor: 0) > PlatformPolicy.minimumMacOS)
 
         #expect(PlatformPolicy.parseVersion("26.1") == OSVersion(major: 26, minor: 1))
@@ -23,7 +19,6 @@ import Testing
         #expect(PlatformPolicy.parseVersion("abc") == nil)
         #expect(PlatformPolicy.parseVersion("26.-1") == nil)
 
-        // Runtime status decisions: unknown is never a pass.
         if case .supported = PlatformPolicy.checkOperatingSystem("26.1") {} else {
             Issue.record("26.1 should be supported")
         }
@@ -35,7 +30,6 @@ import Testing
         #expect(!PlatformPolicy.checkOperatingSystem(nil).userMessage.isEmpty)
     }
 
-    // -- sqliteFTSAvailability --------------------------------------------
 
     @Test func sqliteFTSAvailability() throws {
         let db = try SQLiteDatabase.inMemory()
@@ -51,7 +45,6 @@ import Testing
         }
     }
 
-    // -- corePlatformIsolation --------------------------------------------
 
     @Test func corePlatformIsolation() throws {
         // The core target must never import UI/platform frameworks; on Linux
@@ -74,11 +67,9 @@ import Testing
         #expect(scanned > 5, "expected to scan the core sources")
     }
 
-    // -- FTS input safety ---------------------------------------------------
 
     @Test func ftsQueryEscaping() {
         #expect(FTSQuery.phrase("hello") == "\"hello\"")
-        // Operators in user input lose meaning inside a quoted phrase.
         #expect(FTSQuery.phrase("a OR b") == "\"a OR b\"")
         #expect(FTSQuery.phrase("col:title") == "\"col:title\"")
         #expect(FTSQuery.phrase("say \"hi\"") == "\"say \"\"hi\"\"\"")
@@ -103,7 +94,6 @@ import Testing
         let hits = try store.search(matching: "oat milk")
         #expect(hits.count == 1 && hits[0].documentID == docID)
 
-        // User edits are searchable immediately.
         let pages = try store.pages(revisionID: revID)
         try store.updateEffectiveText(pageID: pages[0].id, text: "edited: espresso beans", at: Date())
             #expect(try store.search(matching: "espresso").count == 1)

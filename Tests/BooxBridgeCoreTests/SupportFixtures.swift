@@ -1,5 +1,3 @@
-// Test fixtures: an in-memory DeviceTransport over a temp catalog so import
-// integration runs without a device or adb.
 import Foundation
 @testable import BooxBridgeCore
 

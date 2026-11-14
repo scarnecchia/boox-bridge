@@ -1,11 +1,4 @@
 // pattern: Imperative Shell
-// Bounded device file browser and EXPLICIT transfers. Everything is scoped
-// to a user-chosen browse root; every write (upload/new-folder) is an
-// explicit user action; downloads/ uploads stage before publishing; remote
-// removal can only ever target app-owned temporary names.
-//
-// Tested by fileTransferIntegration, uploadRaceAndDisconnect,
-// remoteMutationPolicy.
 
 import Foundation
 
@@ -130,7 +123,6 @@ public actor DeviceFileService {
             throw DeviceFileError.destinationExistsNeedsConfirmation(path: destination.raw)
         }
 
-        // Stage under an app-owned temporary sibling, then publish.
         let tempPath = try directory.appending(RemoteTempName.tempName(for: fileName))
         do {
             try await transport.push(localFile: localFile, toRemote: tempPath, serial: serial)

@@ -1,7 +1,3 @@
-// Regression tests for the adversarial-review findings: the listing
-// script is exercised against a REAL shell (the fake transport cannot
-// catch remote-script bugs), plus mtime-refresh and delete-restore
-// semantics in the catalog.
 import Foundation
 import Testing
 @testable import BooxBridgeCore
@@ -12,8 +8,6 @@ import Testing
     // batch, silently dropping every other file from sync and browsing.
     @Test func listingScriptEndToEndAgainstRealShell() async throws {
         try await withTempDirectoryAsync { dir in
-            // A tree with more files than one find batch typically holds,
-            // hostile names included.
             let names = [
                 "plain.pdf",
                 "ünï çø∂é \"quoted\".pdf",
@@ -32,8 +26,6 @@ import Testing
                 try data.write(to: (index % 2 == 0 ? root : sub).appendingPathComponent(name))
             }
 
-            // Run the REAL script through /bin/sh (GNU find/stat/printf on
-            // Linux stand in for toybox, which implements the same tools).
             let script = "#!/bin/sh\n" + AdbCommandBuilder.listingScript(for: try RemotePath(root.path)) + "\n"
             let scriptURL = dir.appendingPathComponent("run-listing.sh")
             try script.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -47,7 +39,6 @@ import Testing
 
             let rootPath = try RemotePath(root.path)
             let records = try RemoteListingParser.parse(result.stdout, root: rootPath)
-            // EVERY file must appear exactly once — no batch truncation.
             #expect(records.count == names.count,
                     "expected \(names.count) records, got \(records.count): \(records.map(\.path.lastComponent))")
             let listed = Set(records.map(\.path.lastComponent))
@@ -66,13 +57,11 @@ import Testing
             let key = DocumentKey(serial: "s", rootID: "r", relativePath: "a.pdf")
             _ = try catalog.commitImport(key: key, kind: .pdf, contentSHA256: "h1",
                                          sizeBytes: 10, pageCount: 1, remoteMtime: 100, remoteSize: 10, at: Date())
-            // Same content, new mtime/size observation from the device.
             _ = try catalog.commitImport(key: key, kind: .pdf, contentSHA256: "h1",
                                          sizeBytes: 10, pageCount: 1, remoteMtime: 300, remoteSize: 10, at: Date())
             let snapshots = try catalog.snapshots(forSerial: "s", rootID: "r")
             #expect(snapshots["a.pdf"]?.remoteMtime == 300,
                     "snapshot must reflect refreshed mtime or unchanged files re-pull forever")
-            // And the planner now classifies it unchanged.
             let record = RemoteFileRecord(path: try RemotePath("/r/a.pdf"), sizeBytes: 10,
                                           modifiedEpochSeconds: 300, isRegularFile: true)
             let plan = ImportPlanner.plan(listing: [record], snapshots: snapshots,
@@ -96,7 +85,6 @@ import Testing
             try catalog.markDocumentDeleted(documentID, at: Date())
             #expect(try catalog.listDocuments().isEmpty)
 
-            // Re-import same content: restores visibility, no throw.
             let second = try catalog.commitImport(key: key, kind: .pdf, contentSHA256: "h1",
                                                   sizeBytes: 10, pageCount: 1, remoteMtime: 2, remoteSize: 10, at: Date())
             guard case .unchanged(let restoredID, _) = second else {
@@ -105,8 +93,6 @@ import Testing
             #expect(restoredID == documentID)
             #expect(try catalog.listDocuments().count == 1)
 
-            // Re-import NEW content while previously deleted: new revision
-            // on the restored document.
             try catalog.markDocumentDeleted(documentID, at: Date())
             let third = try catalog.commitImport(key: key, kind: .pdf, contentSHA256: "h2",
                                                  sizeBytes: 12, pageCount: 1, remoteMtime: 3, remoteSize: 12, at: Date())

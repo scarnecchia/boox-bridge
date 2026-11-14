@@ -3,4 +3,4 @@
 
 #include <sqlite3.h>
 
-#endif /* CBOOXSQLITE_SHIM_H */
+#endif

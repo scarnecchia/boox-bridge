@@ -1,8 +1,5 @@
 // pattern: Functional Core (seam declaration)
-// Credential storage seam. Secrets live ONLY behind this protocol — in the
-// macOS app that is the Keychain adapter; tests use the in-memory store.
-// Nothing in the core ever logs, persists, or error-reports a secret; the
-// redaction helper exists for defense in depth at every formatting site.
+// Secrets must not appear in logs, persistent storage, or error messages.
 
 import Foundation
 

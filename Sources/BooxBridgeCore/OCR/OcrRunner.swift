@@ -1,8 +1,5 @@
 // pattern: Imperative Shell
-// Durable OCR runner. Single-concurrency, bounded retries with an injected
-// clock, revision checks before committing late responses, and credential
-// redaction on every error path. Secrets never appear in errors, logs, or
-// the catalog.
+// Secrets never appear in errors, logs, or the catalog.
 
 import Foundation
 
@@ -132,9 +129,6 @@ public actor OcrRunner {
         profileResolver: @Sendable (_ profileID: String) -> ProviderProfile?
     ) async {
         while let job = try? catalog.nextQueuedJob() {
-            // Cancellation stops SCHEDULING new pages; a request already in
-            // flight may complete (and may already have been billed — the UI
-            // discloses this on cancel).
             if Task.isCancelled { break }
             guard let profile = profileResolver(job.profileID) else {
                 try? catalog.updateJob(
@@ -203,8 +197,6 @@ public actor OcrRunner {
             return .rejected(reason: String(describing: error))
         }
     }
-
-    // MARK: - Internals
 
     private func send(_ request: WireRequest) async throws -> HTTPResponse {
         // Defense in depth: policy runs here AND inside URLSessionTransport,

@@ -1,14 +1,4 @@
 // pattern: Functional Core
-// Pure construction of every adb argv array the app issues, plus the
-// NUL-delimited remote listing parser.
-//
-// Two quoting regimes, never mixed:
-//  - `adb shell <script>` sends the remaining argv JOINED WITH SPACES to a
-//    real shell on the device. Every remote path inside such a script is
-//    wrapped by ShellQuoting (POSIX single quotes). Filenames produced by
-//    the script itself are only ever handled inside double quotes ("$1").
-//  - `adb pull`/`adb push` are parsed locally by adb (sync protocol, no
-//    shell), so paths pass as plain argv elements.
 
 import Foundation
 
@@ -63,8 +53,6 @@ public enum AdbCommandBuilder {
         case .listFiles(let root, let serial):
             return scoped(serial, ["shell", listingScript(for: root)])
         case .listEntries(let root, let serial):
-            // Same record format, no -type filter: directories included so
-            // the file browser can navigate. Callers filter by kind.
             return scoped(serial, ["shell", listingScript(for: root, filesOnly: false)])
         case .pull(let remote, let localDirectory, let serial):
             return scoped(serial, ["pull", remote.raw, localDirectory])

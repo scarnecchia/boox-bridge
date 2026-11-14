@@ -1,9 +1,4 @@
 // pattern: Imperative Shell
-// ADBClient wraps a user-selected adb executable. Every command goes
-// through AdbCommandBuilder (pure argv construction) and the injected
-// ProcessRunning seam. The executable URL is validated at construction:
-// it must exist, be a regular file, and be executable. No server
-// start/kill commands are ever issued — adb manages its own daemon.
 
 import Foundation
 
@@ -164,8 +159,6 @@ public actor AdbClient: DeviceTransport {
             throw AdbClientError.commandFailed(command: "rm \(path)", reason: stderrSummary(result))
         }
     }
-
-    // MARK: - Internals
 
     private func dispatch(_ command: AdbCommand) async throws -> ProcessResult {
         let request = ProcessRequest(

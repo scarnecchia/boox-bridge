@@ -1,8 +1,4 @@
 // pattern: Imperative Shell
-// Process execution seam. The production runner spawns real OS processes
-// with explicit argv (never /bin/sh -c), drains both output pipes
-// concurrently under byte caps, enforces timeouts, and cleans up on
-// cancellation. Tests drive the same interface with a fixture adb script.
 
 import Foundation
 

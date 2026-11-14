@@ -1,8 +1,4 @@
 // pattern: Imperative Shell
-// Device import orchestration: scan an enrolled root, plan pulls, fetch
-// through staging with pre/post metadata + hash checks, validate, then
-// commit atomically to managed storage and the catalog.
-//
 // Safety rules enforced here (tested by usbReconnectImportIntegration,
 // incrementalImportIntegration, changingExportIntegration,
 // catalogRecoveryIntegration):
@@ -140,7 +136,6 @@ public actor DeviceImportService {
         let remote = pull.record.path
         let serial = root.serial
 
-        // Pre-pull metadata snapshot.
         guard let preStat = try await transport.stat(remote: remote, serial: serial) else {
             throw ImportErrorDeferred.unstable("file vanished before pull: \(remote.raw)")
         }

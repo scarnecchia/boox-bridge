@@ -1,6 +1,4 @@
 // pattern: Imperative Shell
-// Device transport seam. AdbClient is the production implementation; tests
-// and deterministic UI scenarios substitute fakes behind this protocol.
 
 import Foundation
 

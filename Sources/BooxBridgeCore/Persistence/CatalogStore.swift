@@ -1,8 +1,5 @@
+
 // pattern: Imperative Shell
-// Durable catalog: documents, revisions, page transcripts, OCR jobs, FTS5
-// search, enrolled import roots, and library-only deletion. All writes are
-// transactional; staging/blob moves happen outside and are committed via
-// this store only after the file is validated.
 
 import Foundation
 
@@ -54,10 +51,7 @@ public final class CatalogStore: @unchecked Sendable {
         try CatalogStore(database: SQLiteDatabase(path: path))
     }
 
-    // MARK: - Migrations
-
     static let migrations: [String] = [
-        // v1
         """
         CREATE TABLE import_roots(
           id TEXT PRIMARY KEY,
@@ -141,8 +135,6 @@ public final class CatalogStore: @unchecked Sendable {
         """)
     }
 
-    // MARK: - Import roots
-
     public func enrollRoot(_ root: ImportRoot) throws {
         try db.execute("""
         INSERT OR REPLACE INTO import_roots(id, serial, remote_root, display_name, enrolled_at)
@@ -168,8 +160,6 @@ public final class CatalogStore: @unchecked Sendable {
                               enrolledAt: Date(timeIntervalSince1970: enrolled))
         }
     }
-
-    // MARK: - Import planning support
 
     public func snapshots(forSerial serial: String, rootID: String) throws -> [String: ImportSnapshot] {
         let rows = try db.query("""
@@ -277,8 +267,6 @@ public final class CatalogStore: @unchecked Sendable {
         }
     }
 
-    // MARK: - Reading
-
     public func listDocuments(includeDeleted: Bool = false) throws -> [DocumentSummary] {
         let filter = includeDeleted ? "" : "WHERE d.deleted_at IS NULL"
         let rows = try db.query("""
@@ -341,8 +329,6 @@ public final class CatalogStore: @unchecked Sendable {
         return Self.string(rows.first?.first ?? .null)
     }
 
-    // MARK: - Editing (user transcripts)
-
     /// Edit the effective text of a page. User edits are never overwritten
     /// by OCR: raw transcription is stored separately.
     public func updateEffectiveText(pageID: Int64, text: String, at date: Date) throws {
@@ -383,8 +369,6 @@ public final class CatalogStore: @unchecked Sendable {
         }
     }
 
-    // MARK: - Local (library-only) deletion
-
     /// Mark a document deleted in the local library. Never touches the
     /// device, blobs, or revisions — re-import restores visibility.
     public func markDocumentDeleted(_ documentID: Int64, at date: Date) throws {
@@ -392,8 +376,6 @@ public final class CatalogStore: @unchecked Sendable {
                        bindings: [.real(date.timeIntervalSince1970), .real(date.timeIntervalSince1970), .integer(documentID)])
         try db.execute("DELETE FROM notes_fts WHERE rowid=?", bindings: [.integer(documentID)])
     }
-
-    // MARK: - OCR queue
 
     /// Enqueue a job unless an active (queued/running) job with the same
     /// identity exists. Returns the job id, or nil when deduplicated.
@@ -494,8 +476,6 @@ public final class CatalogStore: @unchecked Sendable {
         }
     }
 
-    // MARK: - FTS
-
     /// Reindex one document from its current revision's effective text.
     /// Called inside transactions after any text/metadata change.
     func refreshFTS(documentID: Int64) throws {
@@ -534,8 +514,6 @@ public final class CatalogStore: @unchecked Sendable {
             return SearchHit(documentID: id, title: title, snippet: snippet)
         }
     }
-
-    // MARK: - Row mapping
 
     static func summary(from row: [SQLiteValue]) -> DocumentSummary? {
         guard case .integer(let id) = row[0],
@@ -595,8 +573,6 @@ public final class CatalogStore: @unchecked Sendable {
         }
     }
 }
-
-// MARK: - FTS input safety
 
 /// pattern: Functional Core
 /// Literal user input must never be executed as FTS syntax. Everything is

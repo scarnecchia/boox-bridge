@@ -1,8 +1,6 @@
 // pattern: Functional Core
-// Provider wire codecs. Request encoders and response decoders for the
-// three adapter kinds, as pure functions over Codable DTOs. Page content is
-// TRANSCRIPTION INPUT ONLY — it is placed in the user message text/image
-// blocks, never in instructions/system roles, and no tools are ever sent.
+// Page content is transcription input only. It stays in user message blocks,
+// never in instructions or system roles, and the request sends no tools.
 
 import Foundation
 
@@ -70,8 +68,6 @@ public enum ProviderWire {
         }
     }
 
-    // MARK: - OpenAI Responses API
-
     struct OpenAIResponsesBody: Codable {
         struct InputItem: Codable {
             let role: String
@@ -114,8 +110,6 @@ public enum ProviderWire {
             headers: authHeaders(apiKey: apiKey, kind: .openAI),
             body: try encoded(body))
     }
-
-    // MARK: - Anthropic Messages API
 
     struct AnthropicBody: Codable {
         struct ContentPart: Codable {
@@ -167,8 +161,6 @@ public enum ProviderWire {
             body: try encoded(body))
     }
 
-    // MARK: - OpenAI-compatible chat/completions
-
     struct ChatCompletionsBody: Codable {
         struct ImageURL: Codable { let url: String }
         struct ContentPart: Codable {
@@ -206,8 +198,6 @@ public enum ProviderWire {
             body: try encoded(body))
     }
 
-    // MARK: - Response decoding
-
     public static func decodeTranscription(
         kind: ProviderKind,
         body: Data
@@ -227,7 +217,6 @@ public enum ProviderWire {
                     let content: [ContentItem]?
                 }
                 let output: [OutputItem]?
-                // Error bodies carry a top-level error object.
                 let error: ErrorMessage?
                 struct ErrorMessage: Decodable {
                     let message: String?
@@ -299,8 +288,6 @@ public enum ProviderWire {
             return text
         }
     }
-
-    // MARK: - Helpers
 
     static func dataURL(png imageData: Data, detail: String?) -> String {
         var url = "data:image/png;base64,\(imageData.base64EncodedString())"

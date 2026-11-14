@@ -1,6 +1,4 @@
 // pattern: Imperative Shell
-// Content hashing via swift-crypto. Streaming so large PDFs never sit fully
-// in memory; the seam lets tests substitute deterministic digests.
 
 import Crypto
 import Foundation

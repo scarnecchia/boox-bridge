@@ -1,6 +1,4 @@
 // pattern: Functional Core
-// Pure minimum-OS policy shared by the Makefile gate, Info.plist metadata
-// check, and runtime diagnostics. macOS Tahoe 26.1 is the floor.
 
 import Foundation
 

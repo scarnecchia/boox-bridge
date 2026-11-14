@@ -1,7 +1,4 @@
 // pattern: Functional Core
-// Transcript export to plain text and Markdown. Page order is the revision
-// page order; the exported text is the user's effective text (edits
-// preserved), falling back to raw transcription.
 
 import Foundation
 

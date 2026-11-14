@@ -1,5 +1,3 @@
-// documentRenderingFixtures + documentLimits — real PDFKit/CoreGraphics
-// against synthetic, non-personal fixtures on macOS.
 
 import BooxBridgeCore
 import PDFKit
@@ -40,15 +38,12 @@ final class DocumentRenderingTests: XCTestCase {
         for pageIndex in 0..<3 {
             let png = try renderer.pngData(revisionSHA256: hash, pageIndex: pageIndex, maxDimensionPoints: 500)
             XCTAssertFalse(png.isEmpty)
-            // White-background, bounded render: expect a real PNG header.
             XCTAssertEqual(String(data: png.prefix(8), encoding: .ascii), "\u{89}PNG\r\n\u{1a}\n")
         }
-        // Page index out of range is explicit, not a crash or blank render.
         XCTAssertThrowsError(try renderer.pngData(revisionSHA256: hash, pageIndex: 99, maxDimensionPoints: 500))
     }
 
     func test_documentLimits() throws {
-        // A PDF exceeding the page-count limit is rejected at validation.
         let document = PDFDocument()
         for index in 0..<(DocumentLimits.maxPageCount + 5) {
             let page = PDFPage()
@@ -69,7 +64,6 @@ final class DocumentRenderingTests: XCTestCase {
             }
         }
 
-        // Garbage that smells like a PDF header is still validated by PDFKit.
         let garbage = FileManager.default.temporaryDirectory.appendingPathComponent("garbage-\(UUID().uuidString).pdf")
         try Data("%PDF-1.7 definitely not a real document".utf8).write(to: garbage)
         XCTAssertThrowsError(try validator.validate(fileAt: garbage))

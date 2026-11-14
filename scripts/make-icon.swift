@@ -61,7 +61,6 @@ func drawGlyph(into ctx: CGContext, tile: CGRect) {
     ctx.rotate(by: -0.06)
     let page = CGRect(x: -pageW / 2, y: -pageH / 2, width: pageW, height: pageH)
     let radius = pageW * 0.08
-    // Soft page shadow.
     ctx.setShadow(offset: CGSize(width: 0, height: -pageH * 0.03), blur: pageW * 0.10,
                   color: CGColor(red: 0, green: 0, blue: 0.15, alpha: 0.35))
     ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.97))
@@ -104,7 +103,6 @@ func drawGlyph(into ctx: CGContext, tile: CGRect) {
     ctx.setFillColor(accent)
     ctx.addPath(CGPath(roundedRect: plugRect, cornerWidth: plugH * 0.45, cornerHeight: plugH * 0.45, transform: nil))
     ctx.fillPath()
-    // Tongue slot.
     let slot = CGRect(
         x: plugRect.midX - plugW * 0.16, y: plugRect.midY - plugH * 0.16,
         width: plugW * 0.32, height: plugH * 0.32)

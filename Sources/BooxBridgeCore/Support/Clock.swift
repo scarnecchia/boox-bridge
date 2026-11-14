@@ -1,7 +1,4 @@
 // pattern: Imperative Shell (seam only)
-// Injectable clock so queue/backoff logic is deterministic in tests. The
-// production adapter reads wall time; nothing in the core reads the system
-// clock directly.
 
 import Foundation
 
