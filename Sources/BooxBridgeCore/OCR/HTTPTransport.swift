@@ -159,10 +159,13 @@ public struct URLSessionTransport: HTTPTransporting {
         /// Register a task's policy context before its request starts.
         func stage(task: URLSessionTask, originalURL: URL, authorizationHeader: String?, apiKeyHeader: String?) {
             lock.lock()
-            // Drop contexts that resolved without a completion callback
-            // (cancelled requests on platforms whose URLSession never
-            // reports them); unbound ones must stay reachable for bind().
-            contexts = contexts.filter { $0.value.bound && $0.value.box.isFinished }
+            // Retain every context that is still live — in flight, or staged
+            // but not yet bound to a continuation — and drop exactly the ones
+            // that are bound AND durably finished. Pruning the inverse would
+            // evict the previous request's context the moment a second send
+            // staged; its completion and cancellation would then find no
+            // continuation to resume and the caller would never return.
+            contexts = contexts.filter { !($0.value.bound && $0.value.box.isFinished) }
             contexts[task.taskIdentifier] = RequestContext(
                 task: task, originalURL: originalURL,
                 authorizationHeader: authorizationHeader, apiKeyHeader: apiKeyHeader
@@ -237,7 +240,15 @@ public struct URLSessionTransport: HTTPTransporting {
 
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
             lock.lock()
-            let context = contexts.removeValue(forKey: task.taskIdentifier)
+            let context = contexts[task.taskIdentifier]
+            // Only a bound context may leave the dictionary here: its result
+            // is delivered directly to the waiting caller. An unbound context
+            // must stay reachable for bind(), which delivers the stashed
+            // result when the operation body runs; removing it would strand
+            // the caller forever.
+            if context?.bound == true {
+                contexts.removeValue(forKey: task.taskIdentifier)
+            }
             let buffered = context?.data ?? Data()
             lock.unlock()
 
@@ -277,16 +288,21 @@ public struct URLSessionTransport: HTTPTransporting {
     /// Resume-once guard for the continuation. Finish may arrive before the
     /// continuation is bound (cancellation racing the operation body); the
     /// result is stashed and delivered at bind time instead. Whatever the
-    /// interleaving, the continuation resumes exactly once.
+    /// interleaving, the continuation resumes exactly once, and `finish`
+    /// records terminal state durably: a bound completion must mark the box
+    /// finished too, or stage-time pruning would never retire the context.
     private final class ContinuationBox: @unchecked Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<HTTPResponse, Error>?
         private var stashed: Result<HTTPResponse, Error>?
+        /// Terminal state, set exactly once by `finish`, regardless of
+        /// whether the result went to a bound continuation or the stash.
+        private var finished = false
 
         var isFinished: Bool {
             lock.lock()
             defer { lock.unlock() }
-            return continuation == nil && stashed != nil
+            return finished
         }
 
         func store(_ continuation: CheckedContinuation<HTTPResponse, Error>) {
@@ -302,6 +318,7 @@ public struct URLSessionTransport: HTTPTransporting {
 
         func finish(_ result: Result<HTTPResponse, Error>) {
             lock.lock()
+            finished = true
             if let continuation = self.continuation {
                 self.continuation = nil
                 lock.unlock()
