@@ -143,4 +143,40 @@ import Testing
         #expect(!EndpointPolicy.redirectAllowed(from: original, to: URL(string: "http://api.example.com/v1")!))
         #expect(EndpointPolicy.redirectAllowed(from: original, to: URL(string: "https://API.Example.Com/v2")!))
     }
+
+    @Test func redirectsRejectCrossPortSameHost() {
+        // A different port is a different origin even when the host matches:
+        // the Authorization key must not follow https://host:443 -> https://host:8443.
+        let original = URL(string: "https://api.example.com:443/v1/chat")!
+        #expect(!EndpointPolicy.redirectAllowed(from: original, to: URL(string: "https://api.example.com:8443/v1/chat")!))
+        #expect(!EndpointPolicy.redirectAllowed(
+            from: URL(string: "http://127.0.0.1:8080/v1")!,
+            to: URL(string: "http://127.0.0.1:9090/v1")!
+        ))
+    }
+
+    @Test func redirectsTreatExplicitDefaultPortAsSameOrigin() {
+        // An explicit default port is the same origin as its absence.
+        let original = URL(string: "https://api.example.com:443/v1/chat")!
+        #expect(EndpointPolicy.redirectAllowed(from: original, to: URL(string: "https://api.example.com/v1/chat")!))
+        #expect(EndpointPolicy.redirectAllowed(from: URL(string: "http://localhost:80/v1")!, to: URL(string: "http://localhost/v1/again")!))
+    }
+
+    @Test func redirectTargetMustPassFullEndpointPolicy() {
+        let original = URL(string: "https://api.example.com/v1/chat")!
+        // Hostname-only matching used to wave these through; the target must
+        // satisfy the full policy on its own.
+        #expect(!EndpointPolicy.redirectAllowed(from: original, to: URL(string: "https://user:pass@api.example.com/v1")!))
+        #expect(!EndpointPolicy.redirectAllowed(from: original, to: URL(string: "https://api.example.com/v1?key=leaked")!))
+        #expect(!EndpointPolicy.redirectAllowed(from: original, to: URL(string: "ftp://api.example.com/v1")!))
+    }
+
+    @Test func redirectsWithinLoopbackHTTPOriginAllowed() {
+        // Loopback http is a legal endpoint, so a same-origin loopback
+        // redirect keeps the request on the origin it was aimed at.
+        let original = URL(string: "http://127.0.0.1:8080/v1/chat")!
+        #expect(EndpointPolicy.redirectAllowed(from: original, to: URL(string: "http://127.0.0.1:8080/v1/again")!))
+        #expect(EndpointPolicy.redirectAllowed(from: URL(string: "http://[::1]:8080/v1")!, to: URL(string: "http://[::1]:8080/v1/again")!))
+        #expect(!EndpointPolicy.redirectAllowed(from: URL(string: "http://[::1]:8080/v1")!, to: URL(string: "http://127.0.0.1:8080/v1")!))
+    }
 }
