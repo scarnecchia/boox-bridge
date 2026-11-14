@@ -235,14 +235,18 @@ public actor OcrRunner {
     }
 
     /// The synthetic capability probe: sends ONLY the 1x1 synthetic image,
-    /// never a user page. Records the result for the exact profile+model.
-    public func probeImageCapability(profile: ProviderProfile) async -> ImageCapability {
-        guard let key = try? credentials.secret(forProfileID: profile.id), !key.isEmpty else {
+    /// never a user page. The caller supplies the key EXPLICITLY — the probe
+    /// never reads the credential store, so testing a draft endpoint with a
+    /// typed key cannot touch the saved pairing (Settings "Test Connection"
+    /// passes the ephemeral draft key; nothing here can mutate the store).
+    /// Records the result for the exact profile+model.
+    public func probeImageCapability(profile: ProviderProfile, apiKey: String) async -> ImageCapability {
+        guard !apiKey.isEmpty else {
             return .rejected(reason: CredentialError.missingKey(profileID: profile.id).description)
         }
         do {
             let request = try ProviderWire.makeRequest(
-                profile: profile, apiKey: key, prompt: ProviderWire.syntheticTestPrompt,
+                profile: profile, apiKey: apiKey, prompt: ProviderWire.syntheticTestPrompt,
                 imagePNGData: SyntheticProbeImage.png
             )
             let response = try await send(request)

@@ -403,25 +403,69 @@ struct FixedRenderer: PageRendering {
     }
 
 
-    @Test func capabilityProbeScenarios() async throws {
+    /// The probe takes its key EXPLICITLY (ephemeral draft key from the
+    /// Settings flow, never the store): the wire call must carry exactly the
+    /// supplied key even though the store still holds a different one, and
+    /// the store is untouched by the probe.
+    @Test func capabilityProbeUsesSuppliedKeyAndLeavesTheStoreUntouched() async throws {
         try await withTempDirectoryAsync { dir in
             let transport = ScriptedTransport()
             let (_, runner, credentials) = try makeFixture(transport: transport, directory: dir)
-            try credentials.saveSecret("k-1", forProfileID: "p1")
+            try credentials.saveSecret("stored-KA", forProfileID: "p1")
             let profile = ProviderProfile(id: "p1", displayName: "P", kind: .openAICompatible,
                                           baseURL: URL(string: "https://api.example.com/v1")!, modelID: "vision-model")
 
             transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"choices":[{"message":{"content":"OK"}}]}"#.utf8)))
-            #expect(await runner.probeImageCapability(profile: profile) == .verified)
+            let result = await runner.probeImageCapability(profile: profile, apiKey: "draft-KB")
 
-            try credentials.saveSecret("bad", forProfileID: "p1")
+            #expect(result == .verified)
+            #expect(transport.recorded.count == 1)
+            let wire = try #require(transport.recorded.first)
+            #expect(wire.url.hasSuffix("api.example.com/v1/chat/completions"))
+            #expect(wire.headers["Authorization"] == "Bearer draft-KB",
+                    "the probe must send the explicitly supplied ephemeral key, not the stored one")
+            #expect(try credentials.secret(forProfileID: "p1") == "stored-KA",
+                    "probing must not mutate the stored credential")
+        }
+    }
+
+    /// Wire-level fail-closed check: with no key of any kind, the probe is
+    /// refused before any network call.
+    @Test func capabilityProbeWithoutKeyNeverReachesNetwork() async throws {
+        try await withTempDirectoryAsync { dir in
+            let transport = ScriptedTransport()
+            let (_, runner, _) = try makeFixture(transport: transport, directory: dir)
+            let profile = ProviderProfile(id: "p1", displayName: "P", kind: .openAICompatible,
+                                          baseURL: URL(string: "https://api.example.com/v1")!, modelID: "vision-model")
+
+            let result = await runner.probeImageCapability(profile: profile, apiKey: "")
+
+            if case .rejected(let reason) = result {
+                #expect(reason.contains("API key"))
+            } else {
+                Issue.record("missing key must reject")
+            }
+            #expect(transport.recorded.isEmpty, "no key must mean no wire call")
+        }
+    }
+
+    @Test func capabilityProbeScenarios() async throws {
+        try await withTempDirectoryAsync { dir in
+            let transport = ScriptedTransport()
+            let (_, runner, credentials) = try makeFixture(transport: transport, directory: dir)
+            let profile = ProviderProfile(id: "p1", displayName: "P", kind: .openAICompatible,
+                                          baseURL: URL(string: "https://api.example.com/v1")!, modelID: "vision-model")
+
+            transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"choices":[{"message":{"content":"OK"}}]}"#.utf8)))
+            #expect(await runner.probeImageCapability(profile: profile, apiKey: "k-1") == .verified)
+
             transport.enqueue(HTTPResponse(status: 401, body: Data(#"{"error":{"message":"bad key"}}"#.utf8)))
-            if case .rejected(let reason) = await runner.probeImageCapability(profile: profile) {
+            if case .rejected(let reason) = await runner.probeImageCapability(profile: profile, apiKey: "bad") {
                 #expect(reason.contains("authentication"))
             } else { Issue.record("401 must reject as auth") }
 
             transport.enqueue(HTTPResponse(status: 415, body: Data()))
-            if case .rejected(let reason) = await runner.probeImageCapability(profile: profile) {
+            if case .rejected(let reason) = await runner.probeImageCapability(profile: profile, apiKey: "k-1") {
                 #expect(reason.contains("image"))
             } else { Issue.record("415 must reject as image-unsupported") }
 
@@ -429,17 +473,12 @@ struct FixedRenderer: PageRendering {
             #expect(body.contains(SyntheticProbeImage.png.base64EncodedString()))
             #expect(body.contains(ProviderWire.syntheticTestPrompt))
 
-            let keyless = ProviderProfile(id: "nokey", displayName: "N", kind: .openAI,
-                                          baseURL: URL(string: "https://api.example.com/v1")!, modelID: "m")
-            if case .rejected(let reason) = await runner.probeImageCapability(profile: keyless) {
-                #expect(reason.contains("API key"))
-            } else { Issue.record("missing key must reject") }
-
             let unsafe = ProviderProfile(id: "p1", displayName: "U", kind: .openAI,
                                          baseURL: URL(string: "http://api.example.com/v1")!, modelID: "m")
-            if case .rejected(let reason) = await runner.probeImageCapability(profile: unsafe) {
+            if case .rejected(let reason) = await runner.probeImageCapability(profile: unsafe, apiKey: "k-1") {
                 #expect(reason.contains("loopback"))
             } else { Issue.record("plain http off-loopback must be rejected") }
+            _ = credentials // fixture store: no longer consulted by the probe
         }
     }
 

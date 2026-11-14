@@ -622,14 +622,6 @@ final class AppEnvironment {
         }
     }
 
-    func storeAPIKey(_ key: String, for profileID: String) {
-        do {
-            try credentials.saveSecret(key, forProfileID: profileID)
-        } catch {
-            appendActivity(title: "Keychain error", detail: String(describing: error))
-        }
-    }
-
     func hasStoredKey(for profileID: String) -> Bool {
         guard let key = try? credentials.secret(forProfileID: profileID) else { return false }
         return !key.isEmpty

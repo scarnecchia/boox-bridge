@@ -215,47 +215,65 @@ struct ProviderSettingsTab: View {
         let suppliesNewKey = !draftKey.isEmpty
         // Key-origin binding, evaluated against the SAVED profile (never the
         // draft alone): a changed normalized origin — scheme, host, or
-        // effective port — must not reuse the stored secret, and the stored
-        // secret must be removed before the new endpoint is persisted.
+        // effective port — must not reuse the stored secret. The plan applies
+        // the rotate branch HERE, at save time; testing never mutates the
+        // saved pairing.
         let policy = CredentialOriginPolicy(
             storedOrigin: app.profiles.first(where: { $0.id == id })
                 .map { ProviderOrigin(url: $0.baseURL) },
             hasStoredKey: app.hasStoredKey(for: id))
-        let decision = policy.decision(draftOrigin: ProviderOrigin(url: url),
-                                       suppliesNewKey: suppliesNewKey)
-        switch decision {
-        case .endpointInvalid:
-            app.appendActivity(title: "Provider not saved", detail: Self.invalidBaseURLHint)
-            return
-        case .rotateCredential, .retireCredentialRequireNewKey:
-            // Fail-closed: if the old secret cannot be removed, abort the
-            // whole save — the saved profile and its key stay paired on the
-            // old origin, and nothing is stored that could send the old key
-            // to the new one.
-            do {
-                try app.credentials.deleteSecret(forProfileID: id)
-            } catch {
-                app.appendActivity(title: "Provider not saved",
-                                   detail: "The stored API key could not be removed (\(String(describing: error))). Fix Keychain access, then save again.")
-                return
+        let plan = CredentialSavePlan.plan(
+            decision: policy.decision(draftOrigin: ProviderOrigin(url: url),
+                                      suppliesNewKey: suppliesNewKey),
+            suppliesNewKey: suppliesNewKey)
+        // Execute steps in order; the first failure aborts fail-closed and
+        // later steps never run. Credential write failures propagate — they
+        // are never suppressed — so "Saved" is reported only after the key
+        // store (when the plan has one) confirmed the write. The typed key
+        // stays in the field on failure for an explicit retry.
+        var keyClearedReported = false
+        for step in plan.steps {
+            switch step {
+            case .removeStoredSecret:
+                // Fail-closed: if the old secret cannot be removed, abort the
+                // whole save — the saved profile and its key stay paired on
+                // the old origin, and nothing is stored that could send the
+                // old key to the new one.
+                do {
+                    try app.credentials.deleteSecret(forProfileID: id)
+                } catch {
+                    app.appendActivity(title: "Provider not saved",
+                                       detail: "The stored API key could not be removed (\(String(describing: error))). Fix Keychain access, then save again.")
+                    return
+                }
+            case .persistProfile:
+                if app.profiles.contains(where: { $0.id == id }) {
+                    app.saveProfiles(app.profiles.map { $0.id == id ? updated : $0 })
+                } else {
+                    app.saveProfiles(app.profiles + [updated])
+                    selectionID = id
+                }
+                if plan.reportsKeyCleared && !keyClearedReported {
+                    keyClearedReported = true
+                    capability = .unknown
+                    app.appendActivity(title: "API key cleared",
+                                       detail: "Endpoint changed for \(updated.displayName) — re-enter the key for the new address (scheme, host, or port).")
+                }
+            case .storeDraftKey:
+                do {
+                    try app.credentials.saveSecret(draftKey, for: id)
+                    draftKey = ""
+                } catch {
+                    // Fail-closed: report the storage failure instead of
+                    // claiming success. Depending on the plan stage the
+                    // stored state has no usable key (rotation removed the
+                    // old one) or the old key still validly pairs with the
+                    // same origin (replacement) — never a mismatched pair.
+                    app.appendActivity(title: "Provider key not stored",
+                                       detail: "The API key could not be stored (\(String(describing: error))). Fix Keychain access, then save again — the typed key is kept.")
+                    return
+                }
             }
-            capability = .unknown
-            if case .retireCredentialRequireNewKey = decision {
-                app.appendActivity(title: "API key cleared",
-                                   detail: "Endpoint changed for \(updated.displayName) — re-enter the key for the new address (scheme, host, or port).")
-            }
-        case .keepCredential:
-            break
-        }
-        if app.profiles.contains(where: { $0.id == id }) {
-            app.saveProfiles(app.profiles.map { $0.id == id ? updated : $0 })
-        } else {
-            app.saveProfiles(app.profiles + [updated])
-            selectionID = id
-        }
-        if suppliesNewKey {
-            app.storeAPIKey(draftKey, for: id)
-            draftKey = ""
         }
         app.appendActivity(title: "Saved provider \(updated.displayName)")
     }
@@ -263,39 +281,60 @@ struct ProviderSettingsTab: View {
     private func testCapability() async {
         guard let id = selectionID,
               let url = URL(string: draftBaseURL.trimmingCharacters(in: .whitespaces)) else { return }
-        let suppliesNewKey = !draftKey.isEmpty
-        // Key-origin binding, evaluated BEFORE the probe: the probe fetches
-        // the stored secret by profile id, so without this gate an edited
-        // endpoint would send the old secret to a different origin and
-        // bypass the save-time binding entirely.
+        // One read-only look at the stored secret, shared by the policy and
+        // the plan. Test Connection NEVER mutates stored credentials: the
+        // probe runs with an ephemeral key — the typed draft value sent to
+        // the draft origin (what the button authorizes), or the stored value
+        // read strictly read-only when the origin is unchanged. Persisting a
+        // key is Save Profile's job, where the rotate branch applies and
+        // store failures abort fail-closed. Probing with a stored key whose
+        // read failed is refused: unknown is not a credential.
+        let stored: StoredCredential
+        do {
+            let key = try app.credentials.secret(forProfileID: id)
+            stored = key?.isEmpty == false ? .present(key!) : .absent
+        } catch {
+            stored = .unreadable(String(describing: error))
+        }
+        let hasStoredKey: Bool = {
+            if case .present = stored { return true }
+            return false
+        }()
         let policy = CredentialOriginPolicy(
             storedOrigin: app.profiles.first(where: { $0.id == id })
                 .map { ProviderOrigin(url: $0.baseURL) },
-            hasStoredKey: app.hasStoredKey(for: id))
-        switch policy.decision(draftOrigin: ProviderOrigin(url: url),
-                               suppliesNewKey: suppliesNewKey) {
-        case .endpointInvalid:
-            capability = .rejected(reason: Self.invalidBaseURLHint)
+            hasStoredKey: hasStoredKey)
+        let probePlan = CredentialProbePlan.plan(
+            decision: policy.decision(draftOrigin: ProviderOrigin(url: url),
+                                      suppliesNewKey: !draftKey.isEmpty),
+            draftKey: draftKey,
+            stored: stored)
+        switch probePlan {
+        case .blocked(let block):
+            capability = .rejected(reason: Self.blockMessage(block))
             return
-        case .retireCredentialRequireNewKey:
-            capability = .rejected(reason: Self.changedOriginHint)
-            return
-        case .rotateCredential:
-            // The typed key replaces the stored one for the new origin, so
-            // the probe exercises exactly what a save would store.
-            app.storeAPIKey(draftKey, for: id)
-        case .keepCredential:
-            if suppliesNewKey {
-                app.storeAPIKey(draftKey, for: id)
-            }
+        case .probe(let apiKey):
+            let profile = ProviderProfile(id: id, displayName: draftName, kind: draftKind,
+                                          baseURL: url, modelID: draftModel.trimmingCharacters(in: .whitespaces))
+            testing = true
+            defer { testing = false }
+            let runner = OcrRunner(catalog: app.catalog, transport: URLSessionTransport(),
+                                   credentials: app.credentials, renderer: app.renderer, clock: app.clock)
+            capability = await runner.probeImageCapability(profile: profile, apiKey: apiKey)
         }
-        let profile = ProviderProfile(id: id, displayName: draftName, kind: draftKind,
-                                      baseURL: url, modelID: draftModel.trimmingCharacters(in: .whitespaces))
-        testing = true
-        defer { testing = false }
-        let runner = OcrRunner(catalog: app.catalog, transport: URLSessionTransport(),
-                               credentials: app.credentials, renderer: app.renderer, clock: app.clock)
-        capability = await runner.probeImageCapability(profile: profile)
+    }
+
+    private static func blockMessage(_ block: CredentialProbeBlock) -> String {
+        switch block {
+        case .invalidEndpoint:
+            return invalidBaseURLHint
+        case .changedOriginNeedsNewKey:
+            return changedOriginHint
+        case .noStoredKey:
+            return "No API key for this profile — enter it, then test."
+        case .storedKeyUnreadable(let detail):
+            return "The stored API key could not be read (\(detail)) — fix Keychain access, then test again."
+        }
     }
 }
 
