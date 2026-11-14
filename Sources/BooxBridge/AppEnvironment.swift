@@ -79,6 +79,10 @@ final class AppEnvironment {
     private(set) var activity: [ActivityEvent] = []
     private(set) var importSummaries: [String: ImportSummary] = [:]
     private(set) var activeJobs: [OcrJob] = []
+    /// Persisted terminal transcription jobs (newest first, capped): failures
+    /// with reasons and completed pages, so auth/render failures and
+    /// interrupted recoveries surface even when the queue is empty.
+    private(set) var jobHistory: [OcrJob] = []
     private(set) var selectedSerial: String?
     private(set) var adbVersion: String?
     private(set) var adbPathError: String?
@@ -109,6 +113,8 @@ final class AppEnvironment {
     private var recoveryTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
     private var ocrTask: Task<Void, Never>?
+    private var ocrPollTask: Task<Void, Never>?
+    private var drainOwnership = OCRDrainOwnership()
 
     struct TransportBox: Sendable {
         let makeTransport: @Sendable () throws -> DeviceTransport
@@ -235,6 +241,7 @@ final class AppEnvironment {
         } catch {
             appendActivity(title: "Library refresh failed", detail: String(describing: error))
         }
+        rebuildJobHistory()
     }
 
     func refreshLibrary() {
@@ -400,25 +407,58 @@ final class AppEnvironment {
                            detail: "Every page already has transcription text.")
             return
         }
+        // The store returns the job id when it enqueued or reset the job,
+        // nil when an active job with the same identity already exists, and
+        // throws on real failures. All three are reported distinctly: a
+        // deduplicated page is an accurate zero, never a swallowed error.
         var enqueued = 0
+        var alreadyQueued = 0
+        var failures: [String] = []
         for index in targets {
-            if (try? catalog.enqueueJob(
-                revisionID: revisionID, pageIndex: index, profileID: profile.id,
-                modelID: profile.modelID, promptVersion: PromptVersion.current,
-                at: clock.now())) != nil {
-                enqueued += 1
+            do {
+                if try catalog.enqueueJob(
+                    revisionID: revisionID, pageIndex: index, profileID: profile.id,
+                    modelID: profile.modelID, promptVersion: PromptVersion.current,
+                    at: clock.now()) != nil {
+                    enqueued += 1
+                } else {
+                    alreadyQueued += 1
+                }
+            } catch {
+                failures.append("page \(index + 1): \(String(describing: error))")
             }
         }
-        appendActivity(
-            title: "OCR queued",
-            detail: "\(enqueued) page(s) → \(profile.displayName) / \(profile.modelID). Remote requests may bill per page."
-        )
+        let outcome = EnqueueOutcome.report(
+            enqueued: enqueued, alreadyQueued: alreadyQueued, failures: failures,
+            providerName: profile.displayName, modelID: profile.modelID)
+        appendActivity(title: outcome.activityTitle, detail: outcome.activityDetail)
         refreshLibrarySync()
-        startOCRDrain()
+        if outcome.enqueued > 0 {
+            startOCRDrain()
+        }
     }
 
+    /// True while a drain task owns the queue; drives the Cancel/Resume
+    /// affordance in the Activity queue section.
+    var isOCRDraining: Bool { drainOwnership.isOwned }
+
+    /// Start (or chain-start) the queue drain. The OCRDrainOwnership state
+    /// machine keeps exactly one runner: a start while a drain is live cancels
+    /// the live task and relaunches on its actual termination, so the store's
+    /// nextQueuedJob→mark-running claim — which is not atomic across
+    /// concurrent runners — can never be raced by two in-process runners.
     func startOCRDrain() {
-        guard ocrTask == nil else { return }
+        switch drainOwnership.requestStart() {
+        case .launch(let generation):
+            spawnDrain(generation: generation)
+        case .cancelLive(let generation):
+            cancelDrainTask(generation: generation)
+            appendActivity(title: "OCR restarting",
+                           detail: "Waiting for the current run to stop before starting the new pages.")
+        }
+    }
+
+    private func spawnDrain(generation: Int) {
         let runner = OcrRunner(
             catalog: catalog, transport: URLSessionTransport(),
             credentials: credentials, renderer: renderer, clock: clock
@@ -428,15 +468,131 @@ final class AppEnvironment {
             await runner.drain(profileResolver: { id in
                 profiles.first { $0.id == id }
             })
-            await MainActor.run { self?.ocrTask = nil; self?.refreshLibrarySync() }
+            // Read cancellation inside the task: drain returns normally even
+            // when cancelled, so this flag is how completion learns the run
+            // ended by request rather than by an emptied queue.
+            let wasCancelled = Task.isCancelled
+            await MainActor.run { self?.drainTaskDidFinish(generation: generation, wasCancelled: wasCancelled) }
+        }
+        // Publish running/progress transitions while the drain works; the
+        // Activity queue and the detail editor both read these slices.
+        ocrPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                if Task.isCancelled { break }
+                await MainActor.run { self?.refreshOCRViews() }
+            }
+        }
+    }
+
+    private func cancelDrainTask(generation: Int) {
+        // Stale guard: only the current owner's task may be cancelled.
+        guard drainOwnership.generationToCancel() == generation else { return }
+        ocrTask?.cancel()
+        ocrPollTask?.cancel()
+    }
+
+    /// Ownership retires only on the owning generation's completion; a stale
+    /// completion must never clear a newer task's handle or unlock a second
+    /// runner.
+    private func drainTaskDidFinish(generation: Int, wasCancelled: Bool) {
+        let decision = drainOwnership.taskDidFinish(generation: generation)
+        if case .ignoreStale = decision { return }
+        ocrTask = nil
+        ocrPollTask?.cancel()
+        ocrPollTask = nil
+        if wasCancelled { finishCancelledDrain() }
+        refreshLibrarySync()
+        if case .relaunch(let next) = decision {
+            spawnDrain(generation: next)
+        } else if wasCancelled {
+            appendActivity(title: "OCR stopped",
+                           detail: "Queued pages remain queued; resume or retry to continue.")
+        }
+    }
+
+    /// After a cancelled drain no runner exists to retire a job the transport
+    /// aborted mid-flight; without this sweep it would stay "running" until
+    /// the next launch recovery, which never runs mid-session.
+    private func finishCancelledDrain() {
+        guard let running = try? catalog.activeJobs() else { return }
+        var sweepErrors: [String] = []
+        for job in running where job.state == .running {
+            do {
+                try catalog.updateJob(
+                    id: job.id, state: .failed, attempts: job.attempts,
+                    lastError: "cancelled before completion — retry to re-run", at: clock.now())
+            } catch {
+                sweepErrors.append("job \(job.id): \(String(describing: error))")
+            }
+        }
+        if !sweepErrors.isEmpty {
+            appendActivity(title: "OCR stop cleanup failed", detail: sweepErrors.joined(separator: "; "))
         }
     }
 
     func cancelOCRDrain() {
-        ocrTask?.cancel()
-        ocrTask = nil
-        appendActivity(title: "OCR cancelled", detail: "New pages stopped. A request already sent may still have been billed.")
+        guard let generation = drainOwnership.generationToCancel() else {
+            appendActivity(title: "OCR idle", detail: "No transcription is running.")
+            return
+        }
+        cancelDrainTask(generation: generation)
+        appendActivity(title: "OCR cancelling",
+                       detail: "Stopping at the next page boundary. A request already sent may still have been billed.")
     }
+
+    /// Re-enqueue a terminal job with its original identity. Non-nil counts
+    /// as queued (the store resets the terminal row), nil means an active job
+    /// with the same identity already exists, and a throw is surfaced — none
+    /// is silently folded into the queued count.
+    func retryOCRJob(_ job: OcrJob) {
+        do {
+            if try catalog.enqueueJob(
+                revisionID: job.revisionID, pageIndex: job.pageIndex, profileID: job.profileID,
+                modelID: job.modelID, promptVersion: job.promptVersion, at: clock.now()) != nil {
+                appendActivity(title: "OCR retry queued",
+                               detail: "Page \(job.pageIndex + 1) re-queued for \(job.modelID).")
+                refreshLibrarySync()
+                startOCRDrain()
+            } else {
+                appendActivity(title: "OCR retry skipped",
+                               detail: "Page \(job.pageIndex + 1) already has a queued or running job.")
+            }
+        } catch {
+            appendActivity(title: "OCR retry failed", detail: String(describing: error))
+        }
+    }
+
+    /// Mid-batch refresh. Re-reads the document snapshot as well: the detail
+    /// editor's body observes `documents`, so re-setting it re-fetches page
+    /// transcripts and lets the draft policy reload clean drafts as OCR
+    /// commits within the same revision. Read errors keep the previous
+    /// snapshot: the poll is best-effort and must not spam the activity feed
+    /// once a second during a database hiccup; authoritative failures surface
+    /// through refreshLibrarySync.
+    private func refreshOCRViews() {
+        documents = (try? catalog.listDocuments(folder: folderFilter.catalogFolder)) ?? documents
+        activeJobs = (try? catalog.activeJobs()) ?? activeJobs
+        rebuildJobHistory()
+    }
+
+    /// Terminal transcription jobs for the current revisions of live
+    /// documents, newest first, capped. Per-document read errors skip that
+    /// document; primary store failures already surface via
+    /// refreshLibrarySync's listDocuments path.
+    private func rebuildJobHistory() {
+        var terminal: [OcrJob] = []
+        for document in documents {
+            let jobs = (try? catalog.jobs(revisionID: document.currentPageRevisionID)) ?? []
+            terminal.append(contentsOf: jobs.filter {
+                $0.state == .succeeded || $0.state == .failed || $0.state == .cancelled
+            })
+        }
+        terminal.sort { $0.id > $1.id }
+        jobHistory = Array(terminal.prefix(Self.jobHistoryLimit))
+    }
+
+    private static let jobHistoryLimit = 50
 
     // MARK: - Providers
 

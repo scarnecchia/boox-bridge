@@ -18,7 +18,16 @@ struct DocumentDetailView: View {
 
     @State private var pageIndex: Int = 0
     @State private var draftTranscript: String = ""
-    @State private var loadedRevision: Int64 = -1
+    /// TranscriptDraftPolicy load state: what the draft was last loaded from,
+    /// so a same-revision persisted transcript change (OCR completing) can be
+    /// told apart from a local edit.
+    @State private var loadedRevisionID: Int64?
+    @State private var loadedPageID: Int64?
+    @State private var draftBaseline: String = ""
+    /// Set when the persisted transcript changed under a dirty draft; the UI
+    /// offers an explicit reload instead of discarding either side silently.
+    @State private var persistedDiverged = false
+    @State private var stalePersistedText: String = ""
     @State private var showOCRDisclosure = false
     @State private var zoomScale: CGFloat = 1.0
 
@@ -36,12 +45,19 @@ struct DocumentDetailView: View {
     private func content(_ document: DocumentSummary) -> some View {
         let pages = app.pages(revisionID: document.currentPageRevisionID)
         let revisionID = document.currentPageRevisionID
+        let selectedPage = pages[safe: pageIndex]
+        let observation = TranscriptDraftObservation(
+            revisionID: revisionID,
+            pageID: selectedPage?.id,
+            persistedText: TranscriptAuthority.text(for: selectedPage)
+        )
         return VStack(spacing: 0) {
             HSplitView {
                 previewPane(document: document, pages: pages)
                     .frame(minWidth: Metrics.previewPaneMinWidth, maxWidth: .infinity)
                 transcriptPane(pages: pages, revisionID: revisionID)
-                    .frame(minWidth: Metrics.transcriptEditorMinWidth, idealWidth: 420)
+                    .frame(minWidth: Metrics.transcriptEditorMinWidth,
+                           idealWidth: Metrics.transcriptEditorIdealWidth)
             }
         }
         .toolbar {
@@ -82,14 +98,8 @@ struct DocumentDetailView: View {
                 }
             }
         }
-        .onAppear { loadTranscript(pages: pages, revisionID: revisionID) }
-        .onChange(of: revisionID) {
-            loadTranscript(pages: app.pages(revisionID: revisionID), revisionID: revisionID)
-        }
-        .onChange(of: pageIndex) { _, _ in
-            if pageIndex >= 0, pageIndex < pages.count {
-                draftTranscript = effectiveText(pages[pageIndex])
-            }
+        .onChange(of: observation, initial: true) { _, current in
+            applyDraftPolicy(for: current)
         }
     }
 
@@ -98,8 +108,11 @@ struct DocumentDetailView: View {
             if document.pageCount == 0 {
                 ContentUnavailableView("No pages", systemImage: "doc.badge.ellipsis")
             } else {
-                PagePreviewView(environment: app, document: document, pageIndex: pageIndex)
-                    .accessibilityLabel("Page \(pageIndex + 1) preview")
+                ScrollView([.horizontal, .vertical]) {
+                    PagePreviewView(environment: app, document: document,
+                                    pageIndex: pageIndex, zoomScale: zoomScale)
+                        .accessibilityLabel("Page \(pageIndex + 1) preview")
+                }
                 HStack {
                     Button {
                         pageIndex = max(0, pageIndex - 1)
@@ -119,17 +132,17 @@ struct DocumentDetailView: View {
                     }
                     .accessibilityLabel("Next page")
                     .disabled(pageIndex >= document.pageCount - 1)
-                    Slider(value: $zoomScale, in: 0.5...3)
-                        .frame(width: 160)
+                    Slider(value: $zoomScale, in: Metrics.zoomRange)
+                        .frame(width: Metrics.zoomSliderWidth)
                         .accessibilityLabel("Zoom")
                 }
-                .padding(10)
+                .padding(Metrics.previewControlPadding)
             }
         }
     }
 
     private func transcriptPane(pages: [PageTranscript], revisionID: Int64) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Metrics.editorStackSpacing) {
             HStack {
                 Text("Transcription").font(TypeStyles.sectionHeader)
                 Spacer()
@@ -138,6 +151,16 @@ struct DocumentDetailView: View {
                         .font(TypeStyles.monoDetail)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                }
+            }
+            if persistedDiverged {
+                HStack(alignment: .top, spacing: Metrics.editorStackSpacing) {
+                    Text("The transcription changed while you were editing — this draft doesn't include the fresh text.")
+                        .font(TypeStyles.rowSecondary)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Button("Load Fresh Text") { loadFreshPersistedText() }
+                        .accessibilityLabel("Load the fresh persisted transcription, discarding this draft")
                 }
             }
             TextEditor(text: $draftTranscript)
@@ -149,6 +172,11 @@ struct DocumentDetailView: View {
                 Button("Save Edit") {
                     if pageIndex >= 0, pageIndex < pages.count {
                         app.updateTranscript(pageID: pages[pageIndex].id, text: draftTranscript)
+                        // Persisted text now equals the draft: resync the
+                        // baseline so the policy sees clean state and the
+                        // next OCR update can reload normally.
+                        draftBaseline = draftTranscript
+                        persistedDiverged = false
                         app.refreshLibrary()
                     }
                 }
@@ -159,15 +187,40 @@ struct DocumentDetailView: View {
         .padding(Metrics.paneHorizontalInset)
     }
 
-    private func loadTranscript(pages: [PageTranscript], revisionID: Int64) {
-        guard revisionID != loadedRevision else { return }
-        loadedRevision = revisionID
-        pageIndex = 0
-        draftTranscript = pages.first.map(effectiveText(_:)) ?? ""
+    /// Applies the pure reload decision. Runs from onChange — outside body
+    /// evaluation — so mutating @State here is safe.
+    private func applyDraftPolicy(for observation: TranscriptDraftObservation) {
+        let policy = TranscriptDraftPolicy(
+            loadedRevisionID: loadedRevisionID,
+            loadedPageID: loadedPageID,
+            baselineText: draftBaseline,
+            draftText: draftTranscript
+        )
+        switch policy.decision(for: observation) {
+        case .reload(let text):
+            let revisionChanged = observation.revisionID != loadedRevisionID
+            loadedRevisionID = observation.revisionID
+            loadedPageID = observation.pageID
+            draftBaseline = observation.persistedText
+            draftTranscript = text
+            persistedDiverged = false
+            stalePersistedText = ""
+            if revisionChanged { pageIndex = 0 }
+        case .preserve:
+            break
+        case .preserveStale(let persisted):
+            persistedDiverged = true
+            stalePersistedText = persisted
+        }
     }
 
-    private func effectiveText(_ page: PageTranscript) -> String {
-        page.effectiveText.isEmpty ? page.rawTranscription : page.effectiveText
+    /// Explicit escape hatch for the stale-draft state: adopt the fresh
+    /// persisted text over the user's in-progress draft.
+    private func loadFreshPersistedText() {
+        draftTranscript = stalePersistedText
+        draftBaseline = stalePersistedText
+        persistedDiverged = false
+        stalePersistedText = ""
     }
 
     private func export(document: DocumentSummary, format: TranscriptFormat) {
@@ -197,13 +250,15 @@ struct PagePreviewView: View {
     let environment: AppEnvironment
     let document: DocumentSummary
     let pageIndex: Int
+    /// Magnification applied by the enclosing ScrollView; 1.0 fits the pane.
+    var zoomScale: CGFloat = 1.0
 
     @State private var image: NSImage?
 
     var body: some View {
         Group {
             if let image {
-                ImageView(image: image)
+                ImageView(image: image, zoomScale: zoomScale)
             } else {
                 ProgressView("Rendering page…")
             }
@@ -230,6 +285,8 @@ struct PagePreviewView: View {
 
     struct ImageView: NSViewRepresentable {
         let image: NSImage
+        var zoomScale: CGFloat = 1.0
+
         func makeNSView(context: Context) -> NSImageView {
             let view = NSImageView()
             view.imageScaling = .scaleProportionallyUpOrDown
@@ -239,9 +296,12 @@ struct PagePreviewView: View {
             view.image = image
         }
         // NSImageView reports the image's pixel size as its intrinsic size,
-        // which SwiftUI would treat as a window minimum; fill the proposal instead.
+        // which SwiftUI would treat as a window minimum; fill the proposal
+        // instead, scaled by the zoom so the enclosing ScrollView grows and
+        // scrolls magnified content (1.0 keeps the current fit-the-pane size).
         func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSImageView, context: Context) -> CGSize? {
-            proposal.replacingUnspecifiedDimensions()
+            let base = proposal.replacingUnspecifiedDimensions(by: nsView.image?.size ?? .zero)
+            return CGSize(width: base.width * zoomScale, height: base.height * zoomScale)
         }
     }
 }
@@ -260,7 +320,7 @@ struct OCRConsentSheet: View {
     private var targetCount: Int { includeTranscribed ? totalCount : awaitingCount }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Metrics.sheetStackSpacing) {
             Text("Transcribe with a vision model").font(TypeStyles.detailTitle)
             if let profile = activeProfile {
                 Text("Provider: \(profile.displayName)")
@@ -295,12 +355,22 @@ struct OCRConsentSheet: View {
                 .disabled(activeProfile == nil || targetCount == 0)
             }
         }
-        .padding(20)
-        .frame(width: 440)
+        .padding(Metrics.sheetPadding)
+        .frame(width: Metrics.sheetWidth)
     }
 
     @Environment(AppEnvironment.self) private var app
     private var activeProfile: ProviderProfile? { app.activeProfile() }
+}
+
+extension TranscriptAuthority {
+    /// The authoritative text for a persisted page row (nil page → empty).
+    static func text(for page: PageTranscript?) -> String {
+        guard let page else { return "" }
+        return text(effectiveText: page.effectiveText,
+                    rawTranscription: page.rawTranscription,
+                    lastEditedAt: page.lastEditedAt)
+    }
 }
 
 extension Array {
