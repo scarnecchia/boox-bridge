@@ -7,13 +7,22 @@ import SwiftUI
 
 // The AppEnvironment comes from the Settings scene in BooxBridgeApp; the
 // child tabs read it with @Environment(AppEnvironment.self).
+extension ProviderOrigin {
+    /// Normalized origin via the core's canonical rule, so the app's
+    /// key-origin binding and the core's redirect guard can never disagree.
+    init?(url: URL) {
+        guard let origin = EndpointPolicy.normalizedOrigin(of: url) else { return nil }
+        self.init(scheme: origin.scheme, host: origin.host, port: origin.port)
+    }
+}
+
 struct SettingsView: View {
     var body: some View {
         TabView {
             ProviderSettingsTab().tabItem { Label("Providers", systemImage: "key.horizontal") }
             DeviceImportSettingsTab().tabItem { Label("Device Import", systemImage: "externaldrive") }
         }
-        .frame(width: 560, height: 480)
+        .frame(width: Metrics.settingsWindowWidth, height: Metrics.settingsWindowHeight)
     }
 }
 
@@ -42,7 +51,7 @@ struct ProviderSettingsTab: View {
                             Text(profile.modelID).font(TypeStyles.monoDetail)
                                 .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                         }
-                        Spacer(minLength: 8)
+                        Spacer(minLength: Metrics.rowTrailingSpacerMin)
                         if profile.id == app.activeProfile()?.id {
                             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                                 .accessibilityLabel("Used for transcription")
@@ -55,7 +64,7 @@ struct ProviderSettingsTab: View {
                     .tag(profile.id)
                 }
             }
-            .frame(height: 160)
+            .frame(height: Metrics.settingsProviderListHeight)
             // Inline buttons: .toolbar is not reliably rendered on a
             // Settings-scene TabView page.
             HStack {
@@ -64,7 +73,7 @@ struct ProviderSettingsTab: View {
                     .disabled(selectionID == nil)
                 Spacer()
             }
-            .padding(.horizontal).padding(.vertical, 6)
+            .padding(.horizontal).padding(.vertical, Metrics.settingsToolbarVerticalPadding)
             Divider()
             editor
                 .padding()
@@ -172,16 +181,30 @@ struct ProviderSettingsTab: View {
 
     private func deleteSelected() {
         guard let selectionID else { return }
-        try? app.credentials.deleteSecret(forProfileID: selectionID)
+        // Fail-closed: a profile whose key cannot be removed must not vanish —
+        // deleting it anyway would leave an orphaned live Keychain entry with
+        // no owner record. "No secret stored" is not a failure (the store
+        // treats errSecItemNotFound as success).
+        do {
+            try app.credentials.deleteSecret(forProfileID: selectionID)
+        } catch {
+            app.appendActivity(title: "Provider not removed",
+                               detail: "The stored API key could not be deleted (\(String(describing: error))).")
+            return
+        }
         app.saveProfiles(app.profiles.filter { $0.id != selectionID })
         select(app.profiles.first)
     }
 
+    private static let invalidBaseURLHint =
+        "Base URL must include a host, e.g. https://api.example.com/v1."
+    private static let changedOriginHint =
+        "The endpoint's address changed (scheme, host, or port). Re-enter the API key to test the new endpoint — the stored key is never sent to a different origin."
+
     private func saveProfile() {
         let url = URL(string: draftBaseURL.trimmingCharacters(in: .whitespaces))
-        guard let url, url.host != nil else {
-            app.appendActivity(title: "Provider not saved",
-                               detail: "Base URL must include a host, e.g. https://api.example.com/v1.")
+        guard let url else {
+            app.appendActivity(title: "Provider not saved", detail: Self.invalidBaseURLHint)
             return
         }
         // No selection means the editor holds a brand-new provider.
@@ -189,14 +212,40 @@ struct ProviderSettingsTab: View {
         let updated = ProviderProfile(id: id, displayName: draftName.trimmingCharacters(in: .whitespaces),
                                       kind: draftKind, baseURL: url,
                                       modelID: draftModel.trimmingCharacters(in: .whitespaces))
-        // Key-host binding: a changed endpoint must never silently reuse the
-        // old secret for a new host — clear it and require re-entry.
-        if let previous = app.profiles.first(where: { $0.id == id }),
-           previous.baseURL.host != url.host || previous.baseURL.scheme != url.scheme {
-            try? app.credentials.deleteSecret(forProfileID: id)
+        let suppliesNewKey = !draftKey.isEmpty
+        // Key-origin binding, evaluated against the SAVED profile (never the
+        // draft alone): a changed normalized origin — scheme, host, or
+        // effective port — must not reuse the stored secret, and the stored
+        // secret must be removed before the new endpoint is persisted.
+        let policy = CredentialOriginPolicy(
+            storedOrigin: app.profiles.first(where: { $0.id == id })
+                .map { ProviderOrigin(url: $0.baseURL) },
+            hasStoredKey: app.hasStoredKey(for: id))
+        let decision = policy.decision(draftOrigin: ProviderOrigin(url: url),
+                                       suppliesNewKey: suppliesNewKey)
+        switch decision {
+        case .endpointInvalid:
+            app.appendActivity(title: "Provider not saved", detail: Self.invalidBaseURLHint)
+            return
+        case .rotateCredential, .retireCredentialRequireNewKey:
+            // Fail-closed: if the old secret cannot be removed, abort the
+            // whole save — the saved profile and its key stay paired on the
+            // old origin, and nothing is stored that could send the old key
+            // to the new one.
+            do {
+                try app.credentials.deleteSecret(forProfileID: id)
+            } catch {
+                app.appendActivity(title: "Provider not saved",
+                                   detail: "The stored API key could not be removed (\(String(describing: error))). Fix Keychain access, then save again.")
+                return
+            }
             capability = .unknown
-            app.appendActivity(title: "API key cleared",
-                               detail: "Endpoint changed for \(updated.displayName) — re-enter the key for the new host.")
+            if case .retireCredentialRequireNewKey = decision {
+                app.appendActivity(title: "API key cleared",
+                                   detail: "Endpoint changed for \(updated.displayName) — re-enter the key for the new address (scheme, host, or port).")
+            }
+        case .keepCredential:
+            break
         }
         if app.profiles.contains(where: { $0.id == id }) {
             app.saveProfiles(app.profiles.map { $0.id == id ? updated : $0 })
@@ -204,7 +253,7 @@ struct ProviderSettingsTab: View {
             app.saveProfiles(app.profiles + [updated])
             selectionID = id
         }
-        if !draftKey.isEmpty {
+        if suppliesNewKey {
             app.storeAPIKey(draftKey, for: id)
             draftKey = ""
         }
@@ -214,11 +263,34 @@ struct ProviderSettingsTab: View {
     private func testCapability() async {
         guard let id = selectionID,
               let url = URL(string: draftBaseURL.trimmingCharacters(in: .whitespaces)) else { return }
+        let suppliesNewKey = !draftKey.isEmpty
+        // Key-origin binding, evaluated BEFORE the probe: the probe fetches
+        // the stored secret by profile id, so without this gate an edited
+        // endpoint would send the old secret to a different origin and
+        // bypass the save-time binding entirely.
+        let policy = CredentialOriginPolicy(
+            storedOrigin: app.profiles.first(where: { $0.id == id })
+                .map { ProviderOrigin(url: $0.baseURL) },
+            hasStoredKey: app.hasStoredKey(for: id))
+        switch policy.decision(draftOrigin: ProviderOrigin(url: url),
+                               suppliesNewKey: suppliesNewKey) {
+        case .endpointInvalid:
+            capability = .rejected(reason: Self.invalidBaseURLHint)
+            return
+        case .retireCredentialRequireNewKey:
+            capability = .rejected(reason: Self.changedOriginHint)
+            return
+        case .rotateCredential:
+            // The typed key replaces the stored one for the new origin, so
+            // the probe exercises exactly what a save would store.
+            app.storeAPIKey(draftKey, for: id)
+        case .keepCredential:
+            if suppliesNewKey {
+                app.storeAPIKey(draftKey, for: id)
+            }
+        }
         let profile = ProviderProfile(id: id, displayName: draftName, kind: draftKind,
                                       baseURL: url, modelID: draftModel.trimmingCharacters(in: .whitespaces))
-        if !draftKey.isEmpty {
-            app.storeAPIKey(draftKey, for: id)
-        }
         testing = true
         defer { testing = false }
         let runner = OcrRunner(catalog: app.catalog, transport: URLSessionTransport(),

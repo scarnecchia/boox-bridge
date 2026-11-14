@@ -127,7 +127,7 @@ struct DeviceFilesView: View {
                     Text(entry.name)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                    Spacer(minLength: 8)
+                    Spacer(minLength: Metrics.rowTrailingSpacerMin)
                     Text(ByteCountFormatter.string(fromByteCount: entry.sizeBytes, countStyle: .file))
                         .font(TypeStyles.monoDetail)
                         .foregroundStyle(.secondary)
