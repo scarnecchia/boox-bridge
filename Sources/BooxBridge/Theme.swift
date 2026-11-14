@@ -16,8 +16,18 @@ enum Metrics {
     static let contentColumnMaxWidth: CGFloat = 680
     static let detailMaxTextWidth: CGFloat = 680   // readable prose measure
     static let transcriptEditorMinWidth: CGFloat = 240
+    static let transcriptEditorIdealWidth: CGFloat = 420
     static let previewPaneMinWidth: CGFloat = 240
     static let previewMaxDimension: CGFloat = 1400
+    static let previewControlPadding: CGFloat = 10
+    static let zoomSliderWidth: CGFloat = 160
+    static let zoomRange: ClosedRange<CGFloat> = 0.5...3.0
+    static let editorStackSpacing: CGFloat = 8
+    static let sheetStackSpacing: CGFloat = 14
+    static let sheetPadding: CGFloat = 20
+    static let sheetWidth: CGFloat = 440
+    static let activityQueueRowSpacing: CGFloat = 3
+    static let activityRowSpacing: CGFloat = 2
 }
 
 enum TypeStyles {

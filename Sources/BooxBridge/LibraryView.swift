@@ -244,7 +244,7 @@ struct MoveToFolderSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Metrics.sheetStackSpacing) {
             Text("Move \(noteCount) note\(noteCount == 1 ? "" : "s") to folder")
                 .font(TypeStyles.detailTitle)
             Picker("Existing folder", selection: $existingFolder) {
@@ -265,7 +265,7 @@ struct MoveToFolderSheet: View {
                 .disabled(!canMove)
             }
         }
-        .padding(20)
-        .frame(width: 440)
+        .padding(Metrics.sheetPadding)
+        .frame(width: Metrics.sheetWidth)
     }
 }
