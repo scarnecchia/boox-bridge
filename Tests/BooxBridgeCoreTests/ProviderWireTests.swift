@@ -2,6 +2,15 @@ import Foundation
 import Testing
 @testable import BooxBridgeCore
 
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
 @Suite struct ProviderWireTests {
     let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")!
 
@@ -178,5 +187,310 @@ import Testing
         #expect(EndpointPolicy.redirectAllowed(from: original, to: URL(string: "http://127.0.0.1:8080/v1/again")!))
         #expect(EndpointPolicy.redirectAllowed(from: URL(string: "http://[::1]:8080/v1")!, to: URL(string: "http://[::1]:8080/v1/again")!))
         #expect(!EndpointPolicy.redirectAllowed(from: URL(string: "http://[::1]:8080/v1")!, to: URL(string: "http://127.0.0.1:8080/v1")!))
+    }
+}
+
+/// Minimal TCP listener for transport tests: accepts one loopback
+/// connection and never sends a byte, so the only ways an in-flight
+/// request can end are cancellation or the session's own timeouts.
+final class HangServer: @unchecked Sendable {
+    enum AcceptMode {
+        /// HangServer accepts by itself and never responds.
+        case hangOnce
+        /// The owner drives acceptBlocking(); no competing accept thread.
+        /// Two blocked accept() calls on one listener race for the single
+        /// connection, so a reply-serving variant must use this mode.
+        case manual
+    }
+
+    private let lock = NSLock()
+    private var serverFD: Int32 = -1
+    private var clientFD: Int32 = -1
+    private var connected = false
+    private let acceptMode: AcceptMode
+    private(set) var port: UInt16 = 0
+
+    struct SetupFailure: Error, CustomStringConvertible {
+        let message: String
+        var description: String { message }
+    }
+
+    init(acceptMode: AcceptMode = .hangOnce) throws {
+        self.acceptMode = acceptMode
+        #if canImport(Glibc)
+        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #else
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        #endif
+        guard fd >= 0 else {
+            throw SetupFailure(message: "socket: \(String(cString: strerror(errno)))")
+        }
+        serverFD = fd
+        var yes: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0 // ephemeral; the bound port is read back below
+        address.sin_addr = in_addr(s_addr: INADDR_LOOPBACK.bigEndian)
+        let bindResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                bind(fd, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else {
+            throw SetupFailure(message: "bind: \(String(cString: strerror(errno)))")
+        }
+        guard listen(fd, 1) == 0 else {
+            throw SetupFailure(message: "listen: \(String(cString: strerror(errno)))")
+        }
+
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        var bound = sockaddr_in()
+        let nameResult = withUnsafeMutablePointer(to: &bound) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                getsockname(fd, socketAddress, &length)
+            }
+        }
+        guard nameResult == 0 else {
+            throw SetupFailure(message: "getsockname: \(String(cString: strerror(errno)))")
+        }
+        port = UInt16(bigEndian: bound.sin_port)
+
+        // A blocking accept must not occupy a cooperative thread pool slot.
+        if acceptMode == .hangOnce {
+            let thread = Thread { [weak self] in self?.acceptOne() }
+            thread.name = "hang-server-accept"
+            thread.start()
+        }
+    }
+
+    private func acceptOne() {
+        _ = acceptBlocking()
+        // Never read a response and never write: the request hangs.
+    }
+
+    /// Blocking accept for the ReplyServer wrapper. The caller owns the
+    /// returned descriptor only for reading and writing; HangServer.stop()
+    /// closes it, so wrappers must not close it themselves.
+    func acceptBlocking() -> Int32? {
+        let fd = accept(serverFD, nil, nil)
+        guard fd >= 0 else { return nil }
+        lock.lock()
+        clientFD = fd
+        connected = true
+        lock.unlock()
+        return fd
+    }
+
+    /// NSLock is unavailable in async contexts, so async callers go through
+    /// these synchronous snapshots (same pattern as ManualClock).
+    private func isConnectedSnapshot() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return connected
+    }
+
+    private func clientFDSnapshot() -> Int32 {
+        lock.lock(); defer { lock.unlock() }
+        return clientFD
+    }
+
+    @discardableResult
+    func waitUntilConnected(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if isConnectedSnapshot() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
+    /// Polls the accepted socket until the peer closes it. Observing EOF is
+    /// the proof that the in-flight request was actually torn down instead
+    /// of left open until a session timeout.
+    @discardableResult
+    func observedEOF(within timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var buffer = [UInt8](repeating: 0, count: 128)
+        while Date() < deadline {
+            let fd = clientFDSnapshot()
+            if fd >= 0 {
+                #if canImport(Glibc)
+                let count = recv(fd, &buffer, buffer.count, Int32(MSG_DONTWAIT))
+                #else
+                let count = recv(fd, &buffer, buffer.count, MSG_DONTWAIT)
+                #endif
+                if count == 0 { return true }
+            }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return false
+    }
+
+    func stop() {
+        lock.lock()
+        let server = serverFD
+        let client = clientFD
+        serverFD = -1
+        clientFD = -1
+        lock.unlock()
+        if client >= 0 { close(client) }
+        if server >= 0 {
+            shutdown(server, Int32(SHUT_RDWR))
+            close(server)
+        }
+    }
+
+    deinit { stop() }
+}
+
+/// Variant of the listener that answers the first request immediately,
+/// for proving the transport completes ordinary requests.
+final class ReplyServer: @unchecked Sendable {
+    private let server: HangServer
+    private var thread: Thread?
+    private let response: String
+
+    var port: UInt16 { server.port }
+
+    init(response: String) throws {
+        self.response = response
+        // Manual mode: the reply thread below is the only accepter.
+        self.server = try HangServer(acceptMode: .manual)
+        let thread = Thread { [weak self] in self?.replyOnce() }
+        thread.name = "reply-server"
+        thread.start()
+        self.thread = thread
+    }
+
+    private func replyOnce() {
+        guard let fd = server.acceptBlocking() else { return }
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        _ = recv(fd, &buffer, buffer.count, 0)
+        _ = response.withCString { pointer in
+            send(fd, pointer, strlen(pointer), 0)
+        }
+        // Leave the descriptor open: HangServer.stop() closes it, and
+        // closing here would race a later stop() on a reused fd number.
+    }
+
+    func stop() { server.stop() }
+}
+
+/// Serial on purpose: Linux FoundationNetworking can fail to start a
+/// session's transfer when several sessions begin transfers at once, so
+/// these transport tests run one at a time.
+/// Bounds a hang-prone network await so a stalled transport fails the test
+/// loudly instead of wedging the whole runner.
+private struct WatchdogTimeout: Error, CustomStringConvertible {
+    let seconds: TimeInterval
+    var description: String { "operation exceeded \(seconds)s watchdog" }
+}
+
+private func withWatchdog<T: Sendable>(_ seconds: TimeInterval,
+                                       _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { try await operation() }
+        group.addTask {
+            try await Task.sleep(for: .seconds(seconds))
+            throw WatchdogTimeout(seconds: seconds)
+        }
+        let first = try await group.next()!
+        group.cancelAll()
+        // Drain the loser; its (cancellation or timeout) error must not
+        // mask the winning result.
+        while (try? await group.next()) != nil {}
+        return first
+    }
+}
+
+@Suite(.serialized)
+struct TransportCancellationTests {
+
+    /// The transport must complete ordinary requests end-to-end. This path
+    /// silently never completed on Linux FoundationNetworking while the
+    /// delegate was attached to the task instead of the session.
+    @Test func requestAgainstLocalServerCompletes() async throws {
+        let server = try ReplyServer(response: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        defer { server.stop() }
+
+        let transport = URLSessionTransport()
+        let request = HTTPRequest(
+            url: URL(string: "http://127.0.0.1:\(server.port)/v1/responses")!,
+            body: Data(#"{"model":"m"}"#.utf8)
+        )
+        let response = try await withWatchdog(20) {
+            try await transport.send(request)
+        }
+        #expect(response.status == 200)
+        #expect(response.body == Data("ok".utf8))
+    }
+
+    /// A cancelled Task must interrupt an in-flight request: send() fails
+    /// fast with CancellationError and the connection is torn down, instead
+    /// of the await sitting out the full session timeout on a hung request.
+    @Test func cancelledTaskInterruptsInFlightRequest() async throws {
+        let server = try HangServer()
+        defer { server.stop() }
+
+        let transport = URLSessionTransport()
+        let request = HTTPRequest(
+            url: URL(string: "http://127.0.0.1:\(server.port)/v1/responses")!,
+            body: Data(#"{"model":"m"}"#.utf8)
+        )
+
+        let started = Date()
+        let call = Task {
+            try await withWatchdog(20) { try await transport.send(request) }
+        }
+
+        // Cancel only once the request is genuinely in flight: the server
+        // side accept proves the transport already connected.
+        #expect(await server.waitUntilConnected(timeout: 10))
+
+        call.cancel()
+        do {
+            _ = try await call.value
+            Issue.record("send must not complete normally after cancellation")
+        } catch {
+            #expect(error is CancellationError, "expected cancellation, got: \(error)")
+        }
+        // Must return promptly — well before the transport's own 120s
+        // request timeout, which is what a missing cancel bridge would hit.
+        #expect(Date().timeIntervalSince(started) < 30)
+
+        #expect(await server.observedEOF(within: 5))
+    }
+
+    /// Sending to a hung server with no cancellation still surfaces as a
+    /// transport failure (not cancellation), confirming the two outcomes
+    /// stay distinguishable.
+    @Test func hungRequestWithoutCancellationSurfacesAsTransportFailure() async throws {
+        let server = try HangServer()
+        defer { server.stop() }
+
+        // Short session timeouts keep this test fast: the hung request must
+        // fail on its own, as a transport error distinct from cancellation.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3
+        config.timeoutIntervalForResource = 5
+        let transport = URLSessionTransport(configuration: config)
+        let request = HTTPRequest(
+            url: URL(string: "http://127.0.0.1:\(server.port)/v1/responses")!,
+            body: Data(#"{"model":"m"}"#.utf8)
+        )
+
+        do {
+            _ = try await withWatchdog(20) {
+                try await transport.send(request)
+            }
+            Issue.record("a hung request must fail, not succeed")
+        } catch let failure as HTTPFailure {
+            if case .transportError = failure {} else {
+                Issue.record("expected a transport error, got: \(failure)")
+            }
+        } catch {
+            Issue.record("expected an HTTPFailure, got: \(error)")
+        }
     }
 }
