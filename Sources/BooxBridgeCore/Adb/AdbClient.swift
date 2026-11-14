@@ -75,6 +75,7 @@ public actor AdbClient: DeviceTransport {
             // A failed listing must surface, never be read as "no files".
             throw AdbClientError.commandFailed(command: "find \(root)", reason: stderrSummary(result))
         }
+        try rejectTruncatedListing(result)
         return try RemoteListingParser.parse(result.stdout, root: root)
     }
 
@@ -83,6 +84,7 @@ public actor AdbClient: DeviceTransport {
         guard result.succeeded else {
             throw AdbClientError.commandFailed(command: "find \(root)", reason: stderrSummary(result))
         }
+        try rejectTruncatedListing(result)
         return try RemoteListingParser.parse(result.stdout, root: root, includingDirectories: true)
     }
 
@@ -229,6 +231,19 @@ public actor AdbClient: DeviceTransport {
         let stderrText = String(data: result.stderr, encoding: .utf8) ?? ""
         guard result.exitCode == 1, stderrText.contains(Self.absentFileMarker) else {
             throw AdbClientError.commandFailed(command: command, reason: stderrSummary(result))
+        }
+    }
+
+    /// The parser only detects truncation from a missing final NUL. When
+    /// the process-output cap clipped stdout exactly on a record boundary,
+    /// every visible record is well-formed and NUL-terminated, so parsing
+    /// would accept an incomplete listing as complete and a sync built on
+    /// it could fabricate remote deletions. The truncation flag is the only
+    /// signal the bytes cannot carry, so it is checked BEFORE parsing; the
+    /// failure surface is the same truncatedListing error the parser uses.
+    private func rejectTruncatedListing(_ result: ProcessResult) throws {
+        guard !result.stdoutTruncated else {
+            throw RemoteListingParser.ParseError.truncatedListing
         }
     }
 

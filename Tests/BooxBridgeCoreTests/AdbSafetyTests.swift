@@ -257,3 +257,54 @@ import Testing
         #expect(hash == String(repeating: "deadbeef", count: 8))
     }
 }
+
+/// Regression tests for the partial-listing contract at the CLIENT layer:
+/// the process-output cap flags clipped stdout, but the NUL-delimited
+/// parser cannot see that flag — when the cap lands exactly on a record
+/// boundary every visible record is well-formed and NUL-terminated, so a
+/// pre-fix client parsed the incomplete listing as complete and a sync
+/// built on it could fabricate remote deletions. The fixture returns a
+/// byte-perfect complete listing with stdoutTruncated set: only the flag
+/// distinguishes it from a full listing, mirroring a boundary-exact cap.
+@Suite struct AdbListingTruncationTests {
+    /// Emits a real adb's argv shape, then a fully NUL-terminated record
+    /// stream — indistinguishable from success except for the flag.
+    final class BoundaryTruncatedStdoutRunner: ProcessRunning, @unchecked Sendable {
+        func run(_ request: ProcessRequest) async throws -> ProcessResult {
+            var stdout = Data()
+            for name in ["a.pdf", "b.pdf"] {
+                stdout.append(Data("100|1000|regular file\t/sdcard/note/\(name)".utf8 + [0]))
+            }
+            return ProcessResult(
+                exitCode: 0, stdout: stdout, stderr: Data(),
+                stdoutTruncated: true, stderrTruncated: false
+            )
+        }
+    }
+
+    func makeClient() throws -> AdbClient {
+        // AdbClient validates the executable path at init even though this
+        // fixture never spawns a process.
+        let script = FileManager.default.temporaryDirectory
+            .appendingPathComponent("boox-truncation-adb-\(UUID().uuidString).sh")
+        try "#!/bin/sh\nexit 0\n".write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        return try AdbClient(executableURL: script, runner: BoundaryTruncatedStdoutRunner())
+    }
+
+    @Test func listFilesRejectsTruncatedOutputEndingOnNULBoundary() async throws {
+        let client = try makeClient()
+        let root = try RemotePath("/sdcard/note")
+        await #expect(throws: RemoteListingParser.ParseError.truncatedListing) {
+            _ = try await client.listFiles(root: root, serial: "78935a57")
+        }
+    }
+
+    @Test func listEntriesRejectsTruncatedOutputEndingOnNULBoundary() async throws {
+        let client = try makeClient()
+        let root = try RemotePath("/sdcard/note")
+        await #expect(throws: RemoteListingParser.ParseError.truncatedListing) {
+            _ = try await client.listEntries(root: root, serial: "78935a57")
+        }
+    }
+}
