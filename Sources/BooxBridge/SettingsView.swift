@@ -5,16 +5,15 @@
 import BooxBridgeCore
 import SwiftUI
 
+// The AppEnvironment comes from the Settings scene in BooxBridgeApp; the
+// child tabs read it with @Environment(AppEnvironment.self).
 struct SettingsView: View {
-    @Environment(AppEnvironment.self) private var app
-
     var body: some View {
         TabView {
             ProviderSettingsTab().tabItem { Label("Providers", systemImage: "key.horizontal") }
             DeviceImportSettingsTab().tabItem { Label("Device Import", systemImage: "externaldrive") }
         }
         .frame(width: 560, height: 480)
-        .environment(app)
     }
 }
 
