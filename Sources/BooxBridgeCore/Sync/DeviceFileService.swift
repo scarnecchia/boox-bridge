@@ -38,11 +38,14 @@ public struct RemoteEntry: Equatable, Sendable, Identifiable {
 
 public actor DeviceFileService {
     private let transport: DeviceTransport
+    private let hasher: ContentHashing
     public let browseRoot: RemotePath
     public let serial: String
 
-    public init(transport: DeviceTransport, serial: String, browseRoot: RemotePath) {
+    public init(transport: DeviceTransport, serial: String, browseRoot: RemotePath,
+                hasher: ContentHashing = SHA256Hasher()) {
         self.transport = transport
+        self.hasher = hasher
         self.serial = serial
         self.browseRoot = browseRoot
     }
@@ -172,19 +175,34 @@ public actor DeviceFileService {
                     detail: "size mismatch (device \(staged.sizeBytes), local \(localSize))"
                 )
             }
+            let localSHA256 = try hasher.sha256Hex(fileAt: localFile)
 
             if let existing = try await transport.stat(remote: destination, serial: serial), existing.isRegularFile {
                 throw DeviceFileError.publishRace(path: destination.raw)
             }
             try await transport.moveRemoteNoClobber(from: tempPath, to: destination, serial: serial)
 
-            // Confirm our bytes actually landed (a racing writer with mv -n
-            // leaves the destination as theirs, and our temp still present).
+            // `mv -n` exits 0 WITHOUT moving when a competitor won the
+            // publication slot — publish means our temp was consumed. The
+            // temp's absence is the direct evidence; a destination size
+            // comparison alone would read a same-size competitor as
+            // success, reporting wrong bytes plus a leaked app-owned temp.
+            let tempConsumed = try await transport.stat(remote: tempPath, serial: serial) == nil
+            guard tempConsumed else {
+                throw DeviceFileError.publishRace(path: destination.raw)
+            }
             guard let final = try await transport.stat(remote: destination, serial: serial),
                   final.isRegularFile, final.sizeBytes == localSize else {
                 // Our publish lost a race or was clobbered: nothing
                 // overwritten by us; the catch path cleans our temp.
                 throw DeviceFileError.publishRace(path: destination.raw)
+            }
+            // Content identity when the device can hash: equal sizes cannot
+            // tell our bytes from a same-size competitor's.
+            if let remoteHash = try await transport.remoteSHA256(remote: destination, serial: serial) {
+                guard remoteHash == localSHA256 else {
+                    throw DeviceFileError.publishRace(path: destination.raw)
+                }
             }
         } catch {
             // Cancel/disconnect mid-upload: originals preserved; the temp is

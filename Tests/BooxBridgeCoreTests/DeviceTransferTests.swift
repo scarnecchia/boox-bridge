@@ -209,6 +209,39 @@ import Testing
         #expect(transport.removedRemote.count == 1)
     }
 
+    /// Regression test for the SAME-SIZE publish race: `mv -n` exits 0
+    /// without moving when the destination appeared before it, and a
+    /// competitor whose bytes have the same length as ours read as verified
+    /// success under the previous size-only check — reporting success with
+    /// wrong bytes at the destination while leaking the app-owned temp.
+    /// The temp's consumption is the publish evidence, not the size.
+    @Test func sameSizePublishRaceAbortsAndCleansTemp() async throws {
+        let transport = FakeDeviceTransport()
+        let service = makeService(transport)
+        let destination = try root.appending("raced.txt")
+        let squatter = Data("squatter!".utf8)
+        transport.raceWriter = { path in
+            transport.seed(path, data: squatter)
+        }
+
+        try await withTempDirectoryAsync { dir in
+            let local = dir.appendingPathComponent("raced.txt")
+            let ours = Data("original!".utf8)
+            #expect(ours.count == squatter.count) // same length, different content
+            try ours.write(to: local)
+            await #expect(throws: DeviceFileError.publishRace(path: destination.raw)) {
+                try await service.upload(localFile: local, toDirectory: root, overwrite: false)
+            }
+        }
+        // The competitor's bytes are untouched at the destination.
+        #expect(transport.snapshotFiles()[destination.raw]!.data == squatter)
+        // Our temp was cleaned up; nothing app-owned survives remotely.
+        #expect(transport.removedRemote.count == 1)
+        #expect(transport.snapshotFiles().keys.allSatisfy {
+            !RemoteTempName.isAppOwnedTemp(($0 as NSString).lastPathComponent)
+        })
+    }
+
     @Test func disconnectDuringUploadPreservesDeviceStateAndCleansTemp() async throws {
         let transport = FakeDeviceTransport()
         transport.failPush = true
