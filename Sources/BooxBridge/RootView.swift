@@ -32,10 +32,11 @@ struct RootView: View {
     @Environment(AppEnvironment.self) private var app
     @State private var section: AppSection = .library
     @State private var selectedDocumentID: Int64?
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
         @Bindable var app = app
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             List(selection: $section) {
                 Section {
                     ForEach(AppSection.allCases) { item in
@@ -63,7 +64,7 @@ struct RootView: View {
             .safeAreaInset(edge: .bottom) {
                 DeviceStatusFooter()
             }
-        } detail: {
+        } content: {
             switch section {
             case .library:
                 LibraryView(selectedDocumentID: $selectedDocumentID)
@@ -72,8 +73,25 @@ struct RootView: View {
             case .activity:
                 ActivityView()
             }
+        } detail: {
+            switch section {
+            case .library:
+                if let documentID = selectedDocumentID {
+                    DocumentDetailView(documentID: documentID)
+                } else {
+                    ContentUnavailableView("Select a note",
+                                           systemImage: "doc.text.magnifyingglass")
+                }
+            case .deviceFiles, .activity:
+                // These tools span the content column; the visibility change
+                // below hides the detail column for them.
+                EmptyView()
+            }
         }
         .searchable(text: $app.searchText, prompt: "Search notes and transcripts")
+        .onChange(of: section) { _, new in
+            columnVisibility = new == .library ? .all : .doubleColumn
+        }
         .onReceive(NotificationCenter.default.publisher(for: .booxNavigate)) { note in
             if let raw = note.object as? String, let target = AppSection(rawValue: raw) {
                 section = target

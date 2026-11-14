@@ -9,7 +9,9 @@ struct LibraryView: View {
 
     var body: some View {
         Group {
-            if app.documents.isEmpty {
+            if !app.searchResults.isEmpty {
+                searchResults
+            } else if app.documents.isEmpty {
                 emptyState
             } else {
                 documentList
@@ -37,42 +39,42 @@ struct LibraryView: View {
                         .disabled(app.selectedSerial == nil)
                 }
             }
-            if !app.searchResults.isEmpty {
-                Divider()
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Search results").font(TypeStyles.sectionHeader)
-                    ForEach(app.searchResults) { hit in
-                        Button {
-                            selectedDocumentID = hit.documentID
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(hit.title).font(TypeStyles.rowTitle)
-                                Text(hit.snippet).font(TypeStyles.rowSecondary)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .frame(maxWidth: Metrics.detailMaxTextWidth, alignment: .leading)
-                .padding()
-            }
         }
     }
 
+    private var searchResults: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Search results").font(TypeStyles.sectionHeader)
+                ForEach(app.searchResults) { hit in
+                    Button {
+                        selectedDocumentID = hit.documentID
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(hit.title).font(TypeStyles.rowTitle)
+                            Text(hit.snippet).font(TypeStyles.rowSecondary)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(maxWidth: Metrics.detailMaxTextWidth, alignment: .leading)
+            .padding()
+        }
+    }
+
+    // Selection-driven detail: the detail column renders the selected
+    // document. Mixing NavigationLink pushes with a selection List is
+    // undefined behavior per Apple and did not navigate on macOS 26.
     private var documentList: some View {
         List(app.documents, selection: $selectedDocumentID) { document in
-            NavigationLink(value: document.id) {
-                LibraryRow(document: document)
-            }
-            .contextMenu {
-                Button("Reveal Original in Finder") { revealOriginal(document) }
-                Button("Delete from Library…", role: .destructive) { confirmDelete(document) }
-            }
-        }
-        .navigationDestination(for: Int64.self) { id in
-            DocumentDetailView(documentID: id)
+            LibraryRow(document: document)
+                .contextMenu {
+                    Button("Reveal Original in Finder") { revealOriginal(document) }
+                    Button("Delete from Library…", role: .destructive) { confirmDelete(document) }
+                }
         }
     }
 
