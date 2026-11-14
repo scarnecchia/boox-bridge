@@ -489,21 +489,42 @@ public final class CatalogStore: @unchecked Sendable {
         }
     }
 
-    /// Enqueue a job unless an active (queued/running) job with the same
-    /// identity exists. Returns the job id, or nil when deduplicated.
+    /// Enqueue a page for transcription. Returns the job id, or nil when an
+    /// active (queued/running) job with the same identity already exists.
+    ///
+    /// The schema keeps exactly one ocr_jobs row per (revision, page,
+    /// profile, model, prompt) identity in every state, so a repeat enqueue
+    /// cannot insert a second row. An explicit re-enqueue therefore
+    /// overrides the terminal row instead: a succeeded page re-transcribes,
+    /// a failed one retries, a cancelled one resumes — the row is reset to
+    /// a fresh queued job inside this transaction (attempt counter back to
+    /// zero, error and run time cleared). Without that reset the INSERT
+    /// would hit the UNIQUE constraint, and a failed or completed page
+    /// could never be re-processed.
     @discardableResult
     public func enqueueJob(
         revisionID: Int64, pageIndex: Int, profileID: String, modelID: String,
         promptVersion: Int, at date: Date
     ) throws -> Int64? {
         try db.transaction {
-            let active = try db.query("""
-            SELECT id FROM ocr_jobs
+            let existing = try db.query("""
+            SELECT id, state FROM ocr_jobs
             WHERE revision_id=? AND page_index=? AND profile_id=? AND model_id=? AND prompt_version=?
-              AND state IN ('queued','running')
             """, bindings: [.integer(revisionID), .integer(Int64(pageIndex)), .text(profileID),
                             .text(modelID), .integer(Int64(promptVersion))])
-            if case .integer(let existing) = active.first?.first { _ = existing; return nil }
+            if let row = existing.first, row.count >= 2,
+               case .integer(let id) = row[0],
+               case .text(let state) = row[1] {
+                if state == OcrRunState.queued.rawValue || state == OcrRunState.running.rawValue {
+                    return nil
+                }
+                try db.execute("""
+                UPDATE ocr_jobs
+                SET state='queued', attempts=0, last_error=NULL, run_at=NULL, updated_at=?
+                WHERE id=?
+                """, bindings: [.real(date.timeIntervalSince1970), .integer(id)])
+                return id
+            }
 
             try db.execute("""
             INSERT INTO ocr_jobs(revision_id, page_index, profile_id, model_id, prompt_version,
