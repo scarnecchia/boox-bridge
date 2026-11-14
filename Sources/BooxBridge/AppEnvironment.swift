@@ -319,8 +319,17 @@ final class AppEnvironment {
             appendActivity(title: "OCR not started", detail: "No provider profile configured (Settings → Providers).")
             return
         }
-        guard let key = try? credentials.secret(forProfileID: profile.id), key.isEmpty == false else {
-            appendActivity(title: "OCR not started", detail: "No API key stored for \(profile.displayName).")
+        let storedKey: String?
+        do {
+            storedKey = try credentials.secret(forProfileID: profile.id)
+        } catch {
+            appendActivity(title: "OCR not started",
+                           detail: "Keychain read failed for \(profile.displayName): \(String(describing: error))")
+            return
+        }
+        guard storedKey?.isEmpty == false else {
+            appendActivity(title: "OCR not started",
+                           detail: "No API key stored for \(profile.displayName). Enter it in Settings → Providers and save.")
             return
         }
         guard let document = document(id: documentID),

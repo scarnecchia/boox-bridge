@@ -43,6 +43,10 @@ struct ProviderSettingsTab: View {
                                 .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                         }
                         Spacer(minLength: 8)
+                        if profile.id == app.activeProfile()?.id {
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                                .accessibilityLabel("Used for transcription")
+                        }
                         if app.hasStoredKey(for: profile.id) {
                             Image(systemName: "key.fill").foregroundStyle(.secondary)
                                 .accessibilityLabel("API key stored")
@@ -73,6 +77,14 @@ struct ProviderSettingsTab: View {
 
     private var editor: some View {
         Form {
+            Picker("Used for transcription", selection: Binding(
+                get: { app.activeProfileID ?? app.profiles.first?.id },
+                set: { app.activeProfileID = $0 })) {
+                ForEach(app.profiles) { profile in
+                    Text(profile.displayName).tag(profile.id as String?)
+                }
+            }
+            .disabled(app.profiles.isEmpty)
             TextField("Display name", text: $draftName)
             Picker("Adapter", selection: $draftKind) {
                 Text("OpenAI").tag(ProviderKind.openAI)
