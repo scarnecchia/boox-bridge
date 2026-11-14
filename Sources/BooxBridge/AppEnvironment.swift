@@ -598,20 +598,15 @@ final class AppEnvironment {
         rebuildJobHistory()
     }
 
-    /// Terminal transcription jobs for the current revisions of live
-    /// documents, newest first, capped. Per-document read errors skip that
-    /// document; primary store failures already surface via
-    /// refreshLibrarySync's listDocuments path.
+    /// Terminal transcription jobs from the STORE — every live document's
+    /// current revision, independent of the library folder filter — newest
+    /// first by last update, capped. The old per-document rebuild over the
+    /// currently filtered `documents` hid terminal failures whenever a
+    /// folder was selected, and sorting by the immutable job id could push
+    /// a retried job's newest outcome outside the cap. Read errors keep the
+    /// previous snapshot: best-effort, like refreshOCRViews.
     private func rebuildJobHistory() {
-        var terminal: [OcrJob] = []
-        for document in documents {
-            let jobs = (try? catalog.jobs(revisionID: document.currentPageRevisionID)) ?? []
-            terminal.append(contentsOf: jobs.filter {
-                $0.state == .succeeded || $0.state == .failed || $0.state == .cancelled
-            })
-        }
-        terminal.sort { $0.id > $1.id }
-        jobHistory = Array(terminal.prefix(Self.jobHistoryLimit))
+        jobHistory = (try? catalog.terminalJobs(limit: Self.jobHistoryLimit)) ?? jobHistory
     }
 
     private static let jobHistoryLimit = 50

@@ -570,6 +570,29 @@ public final class CatalogStore: @unchecked Sendable {
         return rows.first.flatMap(Self.job(from:))
     }
 
+    /// Terminal transcription jobs (succeeded / failed / cancelled) for the
+    /// current revisions of live documents — independent of any library
+    /// folder filter — newest first by LAST UPDATE with the job id as
+    /// tiebreak, capped. Ordering by update time (not by the immutable id)
+    /// matters: a retried job reuses its row, so its newest outcome carries
+    /// the same id and must not be pushed out of the cap by newer jobs.
+    /// Read-only; no schema or migration impact.
+    public func terminalJobs(limit: Int) throws -> [OcrJob] {
+        let rows = try db.query("""
+        SELECT j.id, j.revision_id, j.page_index, j.profile_id, j.model_id, j.prompt_version,
+               j.state, j.attempts, j.last_error, j.run_at
+        FROM ocr_jobs j
+        JOIN revisions r ON r.id = j.revision_id
+        JOIN documents d ON d.id = r.document_id
+        WHERE j.state IN ('succeeded','failed','cancelled')
+          AND r.id = d.current_revision_id
+          AND d.deleted_at IS NULL
+        ORDER BY j.updated_at DESC, j.id DESC
+        LIMIT ?
+        """, bindings: [.integer(Int64(limit))])
+        return rows.compactMap(Self.job(from:))
+    }
+
     public func updateJob(id: Int64, state: OcrRunState, attempts: Int, lastError: String?, at date: Date) throws {
         try db.execute("""
         UPDATE ocr_jobs SET state=?, attempts=?, last_error=?, run_at=?, updated_at=?
