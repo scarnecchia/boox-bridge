@@ -8,6 +8,65 @@ learned, what surprised you (`SWIFTUI-RULES.md` §10.1). Newest at the top.
 
 ---
 
+## 2026-11-13 — Boox Bridge implementation (automatable scope complete on Linux)
+
+Implemented the approved plan end-to-end for everything Linux-verifiable;
+commits 4058d65 → current. Swift 6.4.2 became available mid-session and
+cleared the earlier toolchain blocker.
+
+**Core (all cross-platform, 57 tests green on Linux, ~1.6s):**
+- Rename/template teardown: fixture-tested portable rename (GNU/BSD sed),
+  display name `Boox Bridge`, dev bundle id `dev.booxbridge.app`,
+  non-sandbox entitlements with documented rationale.
+- Package split `BooxBridgeCore`/`CBooxSQLite` (+swift-crypto 3.x) with
+  macOS-only targets manifest-gated on `canImport(AppKit)`.
+- ADB layer: validated executable, explicit argv, concurrent capped pipe
+  drain, POSIX `kill(2)` watchdog (SIGINT→SIGKILL). TWO host bugs found by
+  tests: corelibs `Process.interrupt/terminate` deliver no signal here
+  (a hung child lived out its full `sleep`), and results raced stream
+  EOF. Both fixed and covered.
+- NUL-delimited listing with hostile-filename fixtures (unicode, quotes,
+  newlines, tabs, leading hyphens); traversal/containment enforced at
+  every layer; two quoting regimes kept separate.
+- SQLite catalog: multi-statement DDL tail-walking (a real bug — prepare
+  stops at the first statement and the tail pointer must be copied while
+  the C buffer lives), migrations, FTS5 (regular, not contentless —
+  contentless forbids DELETE), revisions, library-only deletion,
+  interrupted-job recovery.
+- Import orchestration: pre/post-stat + hash deferral, invalid-file
+  protection of current revisions, no-deletion-inference, single-flight
+  per root.
+- Device files: bounded browse, staged downloads with consent, upload via
+  app-owned temp + `mv -n` publish with race abort; remote overwrite
+  disabled and documented; rm guarded to app-owned temp names; import path
+  proven mutation-free by test.
+- Providers: four presets + custom adapter, exact wire contracts,
+  HTTPS/loopback policy enforced at runner AND transport, redirect
+  cross-origin blocking, synthetic-image capability probe, durable queue
+  (dedupe, restart-interruption, stale-revision double-check, edit
+  preservation), bounded Retry-After-aware backoff, credential redaction
+  verified against the catalog bytes.
+
+**macOS app (written; NOT compiled or run — no macOS host):** Navigation
+split UI (Library/Device Files/Activity), document detail with PDFKit
+preview + adjacent transcript editor + consent-gated OCR, settings for
+providers and device import, `--ui-test-scenario` fixture mode, Keychain
+and PDFKit adapters, app test target (bundle smoke with hardened-runtime
+assertions, AX prerequisite check that reports blocked-not-passed,
+rendering fixtures, Keychain isolation).
+
+**Unrun checks (evidence pending, not passes):** every macOS-only test;
+`make check/test/run` on a Mac; build.sh hardening verification via
+codesign; all physical-device items in plans/usb-and-sync.md §9 (real
+import/reconnect/offline/OCR/transfers on the Note Air 5C); visual and
+VoiceOver review. The `swiftui-pro` and `macos-design` skills remain
+unregistered — UI followed SWIFTUI-RULES.md, typography-designer, and
+HIG; typography-designer WAS loaded before UI work.
+
+**Docs:** PLAN.md rewritten as index; plans/boox-workflow.md,
+usb-and-sync.md, ocr-providers.md added; architecture/build/design
+guides updated; README rewritten.
+
 ## 2026-11-13 — Boox Bridge implementation prerequisite check
 
 Started the approved PDF-first Boox Bridge plan from the supplied plan text.

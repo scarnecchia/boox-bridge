@@ -1,64 +1,72 @@
 # Architecture
 
-The app is small on purpose. This is the whole shape.
+## Targets
 
-## Scene & state ownership
+| Target | Platforms | Contents |
+|---|---|---|
+| `CBooxSQLite` | macOS, Linux | system-library shim (`sqlite3.h` + link) |
+| `BooxBridgeCore` | macOS, Linux | everything platform-neutral |
+| `BooxBridge` | macOS only | SwiftUI app + platform adapters |
+| `BooxBridgeCoreTests` | macOS, Linux | 57 core tests (`make test-core`) |
+| `BooxBridgeAppTests` | macOS only | bundle smoke, AX scenario harness, PDFKit rendering, Keychain isolation |
 
-`BooxBridgeApp` (`@main`) owns exactly one piece of state — the `AppModel` — with
-`@State`, and injects it via `.environment(model)`. Everything downstream reads
-it with `@Environment(AppModel.self)`. This is the modern Observation flow
-(`@Observable` + `@State` for ownership + `@Environment` for passing); there is
-no `ObservableObject`/`@Published`/`@StateObject` anywhere, and adding real
-mutating state later is a drop-in.
+The manifest includes the macOS targets only when `canImport(AppKit)`, so
+Linux `swift test` never sees UI code. `corePlatformIsolation` scans core
+sources to keep SwiftUI/PDFKit/AppKit/Security imports out of the core on
+macOS too.
 
-`AppModel` is `@Observable @MainActor`. It currently just holds the demo
-content (`document`, `items`), but it's the seam where a store, networking, or
-persistence belongs.
+## Core layering (Functional Core / Imperative Shell)
 
-## Navigation
+Pure (no I/O; pattern comment `Functional Core`):
 
-`RootView` is a two-column `NavigationSplitView`:
+- `Adb/RemotePath` + `ShellQuoting` — path policy and quoting
+- `Adb/AdbCommandBuilder` + `RemoteListingParser` — argv construction, NUL listing parsing
+- `Adb/DeviceSnapshot` — `adb devices -l` parsing, USB candidate selection
+- `Sync/ImportPlanner` — listing-vs-catalog diff
+- `Documents/DocumentValidator` — magic-byte sniffing, limits
+- `Persistence/CatalogModels`, `FTSQuery` — value types, FTS input escaping
+- `OCR/ProviderModels`, `ProviderWire`, `EndpointPolicy`, `RetryPolicy` — profiles, wire codecs, policy
+- `Export/TranscriptExporter` — TXT/Markdown generation
 
-- **Sidebar** — `List(SidebarSection.allCases, selection:)`. `SidebarSection`
-  is a small closed enum (`.reading`, `.table`), so navigation is a plain
-  `List(selection:)` + a `switch` in the detail builder. We deliberately do
-  **not** reach for `navigationDestination(for:)` — that's for open-ended,
-  value-driven stacks, not a fixed two-item sidebar.
-- **Detail** — `switch selection { … }`, with a `ContentUnavailableView` for
-  the `nil` case so a deselected sidebar never shows blank canvas
-  (`SWIFTUI-RULES.md` §7.1).
+Side-effecting (pattern comment `Imperative Shell`):
 
-### Adding a destination
+- `Adb/ProcessRunner` — the only process spawner (kill(2) watchdog)
+- `Adb/AdbClient` — actor over a validated adb executable
+- `Sync/DeviceImportService` — staged, hash-verified import orchestration
+- `Sync/DeviceFileService` — bounded browser + explicit transfers
+- `Persistence/SQLiteDatabase`, `CatalogStore` — the only sqlite3 C-API code; migrations + FTS5
+- `Storage/ManagedStorage` — content-addressed blobs, staging, previews
+- `OCR/HTTPTransport` (URLSession + redirect guard), `OcrRunner` (durable queue)
 
-1. Add a case to `SidebarSection` with a `title` and an SF Symbol.
-2. Add a `case` to `RootView.detail` returning your view.
+Seams every test drives: `ProcessRunning`, `DeviceTransport`,
+`HTTPTransporting`, `PageRendering`, `DocumentValidating`,
+`CredentialStoring`, `ContentHashing`, `WallClock`.
 
-The sidebar list and the icon come for free from `CaseIterable`.
+## App layer (macOS)
 
-## View tree
+- `AppEnvironment` (@MainActor @Observable) — owns service wiring, device
+  polling, import triggering, library state, OCR enqueue/drain.
+- `Adapters.swift` — Keychain store, PDFKit renderer/validator, app paths.
+- Views: `RootView` (NavigationSplitView: Library / Device Files /
+  Activity), `LibraryView`, `DocumentDetailView` (preview + adjacent
+  transcript editor, export, OCR consent), `DeviceFilesView`,
+  `ActivityView`, `SettingsView` (Providers, Device Import).
+- `ScenarioServices` — deterministic fixtures behind the same seams,
+  activated ONLY by `--ui-test-scenario`; normal startup never enables
+  them.
+
+## Storage layout
 
 ```
-BooxBridgeApp                        WindowGroup + AppModel ownership
-└── RootView                      NavigationSplitView (sidebar | detail)
-    ├── ReadingView               measure-capped lorem column (title/lead/sections)
-    └── DataTableView             native sortable Table
-        └── StatusBadge           reusable tinted status capsule
+Application Support/Boox Bridge/
+  catalog.sqlite          (+ -wal/-shm)
+  providers.json          (non-secret profiles; keys are in the Keychain)
+  library/blobs/ab/<sha256>   immutable originals
+  library/staging/<uuid>/     in-flight pulls (scrubbed at launch)
+  library/previews/           rendered page cache (rebuildable)
 ```
 
-Each type is in its own file (`swiftui-pro` convention). Views take their data
-as parameters (`ReadingView(document:)`, `DataTableView(items:)`) rather than
-reaching into the environment, so they're trivially previewable and reusable.
+## Historical template docs
 
-## Data model
-
-- `SampleItem` — `Identifiable, Hashable` row; conforms via a real `id`, not
-  `id:` keypaths in the view (data-flow guidance). Its `Status` enum is
-  `Comparable` so the Status column sorts "most live first".
-- `SampleData` / `LoremDocument` — the placeholder content. Fixed timestamps so
-  previews and tests are deterministic. This is the first thing you replace.
-
-## Concurrency
-
-Swift 6 language mode with strict concurrency is on from day one
-(`Package.swift`). `AppModel` is `@MainActor`; the test suite is `@MainActor`
-to touch it. Starting strict is cheaper than retrofitting.
+This guide replaced the template's orientation; the build, design, and
+renaming guides remain (updated in place).

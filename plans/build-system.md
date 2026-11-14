@@ -78,3 +78,24 @@ make notary-setup TEAM_ID=XXXXXXXXXX APPLE_ID=you@example.com
 
 The minimum a change must pass: `make check && make test`. The minimum a *UI*
 change must pass: also `make run` and look at it — see `SWIFTUI-RULES.md` §9.
+
+---
+
+## Boox Bridge additions (2026-11-13)
+
+- **Target split**: `BooxBridgeCore` (+`CBooxSQLite`, swift-crypto) builds
+  on macOS and Linux; the `BooxBridge` app and `BooxBridgeAppTests` are
+  manifest-included only where `canImport(AppKit)`. `make test-core` is the
+  Linux gate; `make test` on macOS adds the app test target.
+- **Minimum OS**: macOS 26.1 (Tahoe). Kept in agreement across
+  `Package.swift` (`.macOS("26.1")`), `Resources/Info.plist`
+  (`LSMinimumSystemVersion`), and the Makefile `MIN_MACOS` (major.minor
+  aware `deps` check).
+- **Signing**: non-App-Store, NON-SANDBOX build (the app must spawn the
+  user-installed adb). Both codesign paths in `build.sh` enable the
+  hardened runtime (`--options runtime`); entitlements grant NO runtime
+  exceptions (no library-validation exceptions). `test_buildAndBundleSmoke`
+  asserts the runtime flag and the absence of disable-library-validation.
+- **Development bundle id**: `dev.booxbridge.app` — replace with a real
+  Developer ID-scoped id before any distribution. Display name is
+  `Boox Bridge` (Info.plist); target/executable stay `BooxBridge`.

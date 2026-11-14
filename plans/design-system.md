@@ -58,3 +58,25 @@ rules keep it honest (`SWIFTUI-RULES.md` §2.4, §5.1):
 
 When you restyle, change `Theme` first; if you're typing the same literal a
 third time in a view, it belongs in `Theme`.
+
+---
+
+## Boox Bridge additions (2026-11-13)
+
+- Native semantic SF type via SwiftUI text styles; hierarchy through
+  weight (`semibold` rows, `headline` sections, `bold` titles) rather than
+  extra families. Rows follow SWIFTUI-RULES: `.lineLimit(1)` +
+  `.truncationMode(.tail)`, monospaced digits for counters.
+- Centralized metrics in `Theme.swift` (`Metrics`, `TypeStyles`): prose
+  measure capped at 680pt (readable transcription column), consistent
+  pane insets, bounded preview dimension.
+- Semantic colors only (`.secondary`, `.tertiary`, `Color.accentColor`,
+  system green/orange for device status) so light/dark stay native.
+  No custom font loading.
+- States are first-class: `ContentUnavailableView` for empty library /
+  no-folder / listing failures, an always-visible device-status footer
+  with actionable guidance (authorization, disconnection, ambiguity),
+  and explicit OCR consent sheet. No fabricated progress percentages.
+- Note: the `swiftui-pro` and `macos-design` skills were not registered
+  during implementation; guidance came from `SWIFTUI-RULES.md`,
+  `typography-designer`, and Apple HIG idioms (recorded in PROGRESS.md).
