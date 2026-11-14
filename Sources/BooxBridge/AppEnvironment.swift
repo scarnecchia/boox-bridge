@@ -134,7 +134,7 @@ final class AppEnvironment {
 
         // Launch recovery: orphan staging cleanup; interrupted OCR jobs
         // surface as resumable failures, never silently restarted.
-        try? catalog.recoverInterruptedJobs(at: clock.now())
+        _ = try? catalog.recoverInterruptedJobs(at: clock.now())
         recoveryTask = Task { [importer] in
             await importer.recoverAfterLaunch()
         }

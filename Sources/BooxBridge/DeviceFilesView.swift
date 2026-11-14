@@ -155,7 +155,6 @@ struct DeviceFilesView: View {
     }
 
     private func downloadSelected(root: RemotePath) async {
-        guard let directory = path ?? root as RemotePath? else { return }
         let files = selected.compactMap { raw in try? RemotePath(raw) }
         guard !files.isEmpty else { return }
         let panel = NSOpenPanel()

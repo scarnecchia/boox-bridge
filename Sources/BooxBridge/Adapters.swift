@@ -138,9 +138,12 @@ final class PDFKitPageRenderer: PageRendering {
         }
         page.draw(with: .cropBox, to: ctx)
 
-        guard let image = ctx.makeImage(),
-              let rep = NSBitmapImageRep(cgImage: image),
-              let png = rep.representation(using: .png, properties: [:]) else {
+        guard let image = ctx.makeImage() else {
+            throw PageRenderError.renderFailed("could not create CGImage from render context")
+        }
+        // NSBitmapImageRep(cgImage:) is non-failable; only PNG encoding can fail.
+        let rep = NSBitmapImageRep(cgImage: image)
+        guard let png = rep.representation(using: .png, properties: [:]) else {
             throw PageRenderError.renderFailed("PNG encoding failed")
         }
         return png

@@ -59,7 +59,7 @@ struct BooxBridgeApp: App {
 
         Settings {
             if let environment {
-                SettingsView(environment: environment)
+                SettingsView()
             } else {
                 Text("Settings unavailable until the app finishes starting.")
             }
