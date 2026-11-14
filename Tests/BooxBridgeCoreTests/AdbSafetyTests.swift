@@ -157,3 +157,103 @@ import Testing
         #expect(DeviceListParser.isNetworkSerial("localhost:5555"))
     }
 }
+
+/// Regression tests for command-specific exit-status handling: these run
+/// the REAL AdbClient against a scripted "adb" executable whose exit codes
+/// and stderr model what an actual device reports. The earlier dispatch
+/// layer threw for every nonzero exit, so stat-on-missing-file aborted
+/// callers (DeviceFileService.upload's existence check failed for every
+/// new filename) and remoteSHA256's optional-tool fallback was unreachable.
+/// Fakes cannot catch this: they model intended semantics, not dispatch.
+@Suite struct AdbClientStatusInterpretationTests {
+    /// Behavior keyed on the remote path's last component; unrecognized
+    /// paths succeed like an existing file.
+    ///
+    /// adb passes a remote shell command as ONE argument, so the fixture
+    /// parses the command line rather than loose argv words: the remote
+    /// path is the trailing single-quoted word after "--".
+    static let scriptedAdbBody = """
+    #!/bin/sh
+    # argv: -s SERIAL shell "stat -c '%s|%Y|%F' -- 'PATH'"
+    #    | -s SERIAL shell "sha256sum -- 'PATH'"
+    if [ "$1" = "-s" ]; then shift 2; fi
+    cmdline="$2"
+    path=$(printf '%s' "$cmdline" | sed -e "s/^.*-- '//" -e "s/'$//")
+    last=$(printf '%s' "$path" | sed 's|.*/||')
+    case "$last" in
+      absent.txt)
+        printf "stat: '%s': No such file or directory\\n" "$path" >&2
+        exit 1 ;;
+      denied.txt)
+        printf "stat: '%s': Permission denied\\n" "$path" >&2
+        exit 1 ;;
+      notool.txt)
+        printf "/system/bin/sh: sha256sum: not found\\n" >&2
+        exit 127 ;;
+      ioerror.txt)
+        printf "sha256sum: %s: Input/output error\\n" "$path" >&2
+        exit 1 ;;
+    esac
+    case "$cmdline" in
+      sha256sum*)
+        printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  %s\\n' "$path"
+        ;;
+      *)
+        printf '123|1700000000|regular file\\n'
+        ;;
+    esac
+    exit 0
+    """
+
+    func scriptedAdb() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("boox-status-adb-\(UUID().uuidString).sh")
+        try Self.scriptedAdbBody.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    @Test func statOnAbsentRemoteFileReturnsNilNotError() async throws {
+        let client = try AdbClient(executableURL: try scriptedAdb())
+        let absent = try RemotePath("/sdcard/note/absent.txt")
+        let record = try await client.stat(remote: absent, serial: "78935a57")
+        #expect(record == nil)
+    }
+
+    @Test func statPermissionFailureStillSurfaces() async throws {
+        let client = try AdbClient(executableURL: try scriptedAdb())
+        let locked = try RemotePath("/sdcard/note/denied.txt")
+        await #expect(throws: AdbClientError.self) {
+            _ = try await client.stat(remote: locked, serial: "78935a57")
+        }
+    }
+
+    @Test func statParsesPresentFile() async throws {
+        let client = try AdbClient(executableURL: try scriptedAdb())
+        let there = try RemotePath("/sdcard/note/there.txt")
+        let record = try await client.stat(remote: there, serial: "78935a57")
+        #expect(record?.sizeBytes == 123 && record?.isRegularFile == true)
+    }
+
+    @Test func missingRemoteHashToolFallsBackToNil() async throws {
+        let client = try AdbClient(executableURL: try scriptedAdb())
+        let target = try RemotePath("/sdcard/note/notool.txt")
+        let hash = try await client.remoteSHA256(remote: target, serial: "78935a57")
+        #expect(hash == nil)
+    }
+
+    @Test func hardHashFailureSurfacesInsteadOfNil() async throws {
+        let client = try AdbClient(executableURL: try scriptedAdb())
+        let target = try RemotePath("/sdcard/note/ioerror.txt")
+        await #expect(throws: AdbClientError.self) {
+            _ = try await client.remoteSHA256(remote: target, serial: "78935a57")
+        }
+    }
+
+    @Test func hashOfPresentFileParses() async throws {
+        let client = try AdbClient(executableURL: try scriptedAdb())
+        let target = try RemotePath("/sdcard/note/there.txt")
+        let hash = try await client.remoteSHA256(remote: target, serial: "78935a57")
+        #expect(hash == String(repeating: "deadbeef", count: 8))
+    }
+}

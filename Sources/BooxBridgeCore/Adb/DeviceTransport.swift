@@ -14,8 +14,14 @@ public protocol DeviceTransport: Sendable {
     /// Files AND directories under `root` (recursive; callers filter depth)
     /// for the bounded device file browser.
     func listEntries(root: RemotePath, serial: String) async throws -> [RemoteFileRecord]
+    /// Remote file metadata, or nil when the file is absent. Absence is a
+    /// normal answer, not an error; permission and transport failures
+    /// throw.
     func stat(remote: RemotePath, serial: String) async throws -> RemoteFileRecord?
     /// Device-side sha256 of a file, when the toybox tooling is present.
+    /// nil means "no device identity available" (tool missing or file
+    /// absent) and callers fall back to local hashing; other failures
+    /// throw.
     func remoteSHA256(remote: RemotePath, serial: String) async throws -> String?
     /// Pull a file into a staging DIRECTORY (caller-managed, must already
     /// exist). Returns the local file URL adb wrote inside it.

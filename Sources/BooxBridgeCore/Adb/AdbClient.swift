@@ -87,8 +87,14 @@ public actor AdbClient: DeviceTransport {
     }
 
     public func stat(remote: RemotePath, serial: String) async throws -> RemoteFileRecord? {
-        let result = try await dispatch(.stat(remote: remote, serial: serial))
-        guard result.succeeded else { return nil }
+        // stat exits nonzero both for "file absent" (the normal, expected
+        // case here) and for genuine errors, so the raw result is needed:
+        // dispatch must not collapse every nonzero exit into a throw.
+        let result = try await dispatch(.stat(remote: remote, serial: serial), onNonZeroExit: .returnResult)
+        if !result.succeeded {
+            try requireAbsentFileFailure(result, command: "stat \(remote)")
+            return nil
+        }
         let line = String(data: result.stdout, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !line.isEmpty else { return nil }
@@ -101,8 +107,24 @@ public actor AdbClient: DeviceTransport {
     }
 
     public func remoteSHA256(remote: RemotePath, serial: String) async throws -> String? {
-        let result = try await dispatch(.sha256(remote: remote, serial: serial))
-        guard result.succeeded else { return nil }
+        // Like stat, sha256sum exits nonzero for benign reasons (tool
+        // missing on the device, file gone) that must fall back to nil,
+        // alongside hard failures that must surface.
+        let result = try await dispatch(.sha256(remote: remote, serial: serial), onNonZeroExit: .returnResult)
+        if !result.succeeded {
+            // Exit 127: the remote shell's command-not-found status — the
+            // optional hash tool is absent. Exit 1 with the ENOENT message:
+            // the tool exists but the file does not. Both mean "no device
+            // identity available"; callers fall back to local hashing.
+            // Anything else is a real failure and must not be swallowed.
+            let stderrText = String(data: result.stderr, encoding: .utf8) ?? ""
+            let toolMissing = result.exitCode == 127
+            let fileMissing = result.exitCode == 1 && stderrText.contains(Self.absentFileMarker)
+            guard toolMissing || fileMissing else {
+                throw AdbClientError.commandFailed(command: "sha256sum \(remote)", reason: stderrSummary(result))
+            }
+            return nil
+        }
         let line = String(data: result.stdout, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let hash = line.split(separator: " ").first.map(String.init) ?? ""
@@ -160,7 +182,17 @@ public actor AdbClient: DeviceTransport {
         }
     }
 
-    private func dispatch(_ command: AdbCommand) async throws -> ProcessResult {
+    /// How a nonzero process exit is treated by `dispatch`. Most commands
+    /// treat any nonzero exit as a hard failure. `stat` and `sha256sum`
+    /// also exit nonzero for benign reasons (absent file, missing remote
+    /// tool), so their callers need the raw exit status and stderr to
+    /// classify the outcome themselves.
+    private enum NonZeroExitPolicy {
+        case fail
+        case returnResult
+    }
+
+    private func dispatch(_ command: AdbCommand, onNonZeroExit: NonZeroExitPolicy = .fail) async throws -> ProcessResult {
         let request = ProcessRequest(
             executable: executableURL,
             arguments: AdbCommandBuilder.argv(for: command),
@@ -175,13 +207,29 @@ public actor AdbClient: DeviceTransport {
                 reason: String(describing: failure)
             )
         }
-        guard result.succeeded else {
+        guard result.succeeded || onNonZeroExit == .returnResult else {
             throw AdbClientError.commandFailed(
                 command: label(for: command),
                 reason: stderrSummary(result)
             )
         }
         return result
+    }
+
+    /// The strerror(3) ENOENT string is byte-identical on bionic/toybox
+    /// (Android) and the host libc, and is the only reliable separator of
+    /// "file absent" from other stat-family failures: the exit code alone
+    /// is 1 for every failure, including EACCES. adb-level errors (offline
+    /// device, unauthorized, server shutdown) never carry this text.
+    private static let absentFileMarker = "No such file or directory"
+
+    /// Accept the result only when the device reported the file as absent;
+    /// anything else (permission denied, transport failure) throws.
+    private func requireAbsentFileFailure(_ result: ProcessResult, command: String) throws {
+        let stderrText = String(data: result.stderr, encoding: .utf8) ?? ""
+        guard result.exitCode == 1, stderrText.contains(Self.absentFileMarker) else {
+            throw AdbClientError.commandFailed(command: command, reason: stderrSummary(result))
+        }
     }
 
     private func timeout(for command: AdbCommand) -> TimeInterval {

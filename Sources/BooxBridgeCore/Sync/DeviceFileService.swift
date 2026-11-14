@@ -2,6 +2,12 @@
 
 import Foundation
 
+#if canImport(Glibc)
+import Glibc
+#else
+import Darwin
+#endif
+
 public enum DeviceFileError: Error, Equatable, Sendable, CustomStringConvertible {
     case outsideBrowseRoot(path: String, root: String)
     case destinationExistsNeedsConfirmation(path: String)
@@ -32,11 +38,14 @@ public struct RemoteEntry: Equatable, Sendable, Identifiable {
 
 public actor DeviceFileService {
     private let transport: DeviceTransport
+    private let hasher: ContentHashing
     public let browseRoot: RemotePath
     public let serial: String
 
-    public init(transport: DeviceTransport, serial: String, browseRoot: RemotePath) {
+    public init(transport: DeviceTransport, serial: String, browseRoot: RemotePath,
+                hasher: ContentHashing = SHA256Hasher()) {
         self.transport = transport
+        self.hasher = hasher
         self.serial = serial
         self.browseRoot = browseRoot
     }
@@ -63,7 +72,9 @@ public actor DeviceFileService {
 
     /// Download remote files into a local directory the user chose. Each
     /// file lands under a unique staging name first, then moves into place;
-    /// an existing local file is only replaced with explicit consent.
+    /// an existing local file is only replaced with explicit consent — and
+    /// the consent decision is re-checked AFTER the pull completes, because
+    /// the destination can appear while the copy is in flight.
     public func download(
         files: [RemotePath],
         intoLocalDirectory directory: URL,
@@ -83,10 +94,21 @@ public actor DeviceFileService {
             try fm.createDirectory(at: staging, withIntermediateDirectories: true)
             do {
                 let staged = try await transport.pull(remote: file, intoStagingDirectory: staging, serial: serial)
+                // The pull awaited above can take a long time; another
+                // process (or a reentrant download) may have created the
+                // destination meanwhile, so the pre-pull consent check is
+                // stale. Publishing here used to removeItem (recursively!)
+                // whatever had appeared, destroying bytes the consent
+                // decision never saw.
                 if fm.fileExists(atPath: destination.path) {
-                    try fm.removeItem(at: destination)
+                    guard overwrite else {
+                        // No-clobber: never touch bytes we never saw.
+                        throw DeviceFileError.destinationExistsNeedsConfirmation(path: destination.lastPathComponent)
+                    }
+                    try replaceAtomically(at: destination, with: staged)
+                } else {
+                    try fm.moveItem(at: staged, to: destination)
                 }
-                try fm.moveItem(at: staged, to: destination)
                 try? fm.removeItem(at: staging)
                 written.append(destination)
             } catch {
@@ -95,6 +117,19 @@ public actor DeviceFileService {
             }
         }
         return written
+    }
+
+    /// Swap `source` in over `destination` in one atomic step: if the
+    /// replacement fails for any reason, the previous bytes stay intact.
+    /// Direct rename(2) provides that guarantee; remove-then-move would
+    /// leave a window where the destination is missing — and any failure
+    /// after the remove destroys the original.
+    private func replaceAtomically(at destination: URL, with source: URL) throws {
+        if rename(source.path, destination.path) != 0 {
+            // errno after a failed call is always a defined POSIX value;
+            // the failable initializer only needs a defensive fallback.
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     /// Upload a local file into a remote folder inside the browse root.
@@ -140,19 +175,34 @@ public actor DeviceFileService {
                     detail: "size mismatch (device \(staged.sizeBytes), local \(localSize))"
                 )
             }
+            let localSHA256 = try hasher.sha256Hex(fileAt: localFile)
 
             if let existing = try await transport.stat(remote: destination, serial: serial), existing.isRegularFile {
                 throw DeviceFileError.publishRace(path: destination.raw)
             }
             try await transport.moveRemoteNoClobber(from: tempPath, to: destination, serial: serial)
 
-            // Confirm our bytes actually landed (a racing writer with mv -n
-            // leaves the destination as theirs, and our temp still present).
+            // `mv -n` exits 0 WITHOUT moving when a competitor won the
+            // publication slot — publish means our temp was consumed. The
+            // temp's absence is the direct evidence; a destination size
+            // comparison alone would read a same-size competitor as
+            // success, reporting wrong bytes plus a leaked app-owned temp.
+            let tempConsumed = try await transport.stat(remote: tempPath, serial: serial) == nil
+            guard tempConsumed else {
+                throw DeviceFileError.publishRace(path: destination.raw)
+            }
             guard let final = try await transport.stat(remote: destination, serial: serial),
                   final.isRegularFile, final.sizeBytes == localSize else {
                 // Our publish lost a race or was clobbered: nothing
                 // overwritten by us; the catch path cleans our temp.
                 throw DeviceFileError.publishRace(path: destination.raw)
+            }
+            // Content identity when the device can hash: equal sizes cannot
+            // tell our bytes from a same-size competitor's.
+            if let remoteHash = try await transport.remoteSHA256(remote: destination, serial: serial) {
+                guard remoteHash == localSHA256 else {
+                    throw DeviceFileError.publishRace(path: destination.raw)
+                }
             }
         } catch {
             // Cancel/disconnect mid-upload: originals preserved; the temp is
