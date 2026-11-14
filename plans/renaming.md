@@ -1,6 +1,6 @@
 # Renaming the template
 
-You forked by `cp -R`. `scripts/rename.sh` turns "Starter" into your app's name
+You forked by `cp -R`. `scripts/rename.sh` turns "BooxBridge" into your app's name
 in one pass.
 
 ```sh
@@ -14,12 +14,12 @@ script rejects anything else.
 
 ## What it rewrites
 
-- **Directories:** `Sources/Starter` → `Sources/NewName`,
-  `Tests/StarterTests` → `Tests/NewNameTests`, `Starter/` →  `NewName/`
+- **Directories:** `Sources/BooxBridge` → `Sources/NewName`,
+  `Tests/BooxBridgeTests` → `Tests/NewNameTests`, `BooxBridge/` →  `NewName/`
   (uses `git mv` when the tree is tracked, falls back to `mv`).
-- **The entitlements file:** `NewName/Starter.entitlements` → `NewName.entitlements`.
-- **Every file's contents:** the bundle id (`com.example.starter` → yours)
-  first, then the name `Starter` → `NewName`. This covers `Package.swift`,
+- **The entitlements file:** `NewName/BooxBridge.entitlements` → `NewName.entitlements`.
+- **Every file's contents:** the bundle id (`dev.booxbridge.app` → yours)
+  first, then the name `BooxBridge` → `NewName`. This covers `Package.swift`,
   `Makefile`, `build.sh`, `Info.plist`, the Swift sources, and the docs.
 
 It skips `.git/`, `build/`, `.build/`, `dist/`, and itself.
@@ -44,7 +44,7 @@ rm scripts/rename.sh   # one-shot; delete it
 ## Doing it by hand
 
 If you'd rather not run the script, the substitutions are exactly: the three
-directory moves above, then a project-wide replace of `com.example.starter`
-and then `Starter`. Build to confirm — the SwiftPM target name, the `.app`
+directory moves above, then a project-wide replace of `dev.booxbridge.app`
+and then `BooxBridge`. Build to confirm — the SwiftPM target name, the `.app`
 name in `build.sh`, the `CFBundleExecutable`, and the entitlements path all
 have to agree, which is the whole reason the script exists.

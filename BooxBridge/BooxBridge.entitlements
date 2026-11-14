@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Boox Bridge runs the user-installed `adb` executable as an external
+	  process, which the App Sandbox forbids. This is a deliberate,
+	  documented deviation from the sandboxed template baseline: the app is
+	  distributed outside the App Store, non-sandboxed, with the hardened
+	  runtime enabled at codesign time (see build.sh) and NO library
+	  validation or other runtime exceptions. USB file access happens
+	  exclusively through that adb process; the app never loads unsigned
+	  code and never redistributes platform-tools itself.
+	-->
+</dict>
+</plist>

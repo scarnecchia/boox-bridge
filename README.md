@@ -1,4 +1,4 @@
-# Starter
+# BooxBridge
 
 A clean, modern **SwiftUI macOS app template** you fork by copying. It's the
 smallest thing that still demonstrates the patterns you actually reuse:
