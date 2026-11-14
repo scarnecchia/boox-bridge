@@ -220,7 +220,7 @@ struct ProviderSettingsTab: View {
         // saved pairing.
         let policy = CredentialOriginPolicy(
             storedOrigin: app.profiles.first(where: { $0.id == id })
-                .map { ProviderOrigin(url: $0.baseURL) },
+                .flatMap { ProviderOrigin(url: $0.baseURL) },  // failable init: map would nest a double optional
             hasStoredKey: app.hasStoredKey(for: id))
         let plan = CredentialSavePlan.plan(
             decision: policy.decision(draftOrigin: ProviderOrigin(url: url),
@@ -302,7 +302,7 @@ struct ProviderSettingsTab: View {
         }()
         let policy = CredentialOriginPolicy(
             storedOrigin: app.profiles.first(where: { $0.id == id })
-                .map { ProviderOrigin(url: $0.baseURL) },
+                .flatMap { ProviderOrigin(url: $0.baseURL) },  // failable init: map would nest a double optional
             hasStoredKey: hasStoredKey)
         let probePlan = CredentialProbePlan.plan(
             decision: policy.decision(draftOrigin: ProviderOrigin(url: url),

@@ -259,10 +259,11 @@ struct PDFKitPageFingerprinter: PageFingerprinting {
             }
             return hashes
         case .png, .jpeg:
+            // NSBitmapImageRep(cgImage:) is non-failable; only the PNG
+            // encoding below can fail.
             guard let image = NSImage(contentsOf: url),
                   let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-                  let rep = NSBitmapImageRep(cgImage: cgImage),
-                  let png = rep.representation(using: .png, properties: [:]) else {
+                  let png = NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:]) else {
                 throw DocumentValidationError.unreadable(kind: DocumentSniffer.kind(of: head))
             }
             return [0: hasher.sha256Hex(of: png)]
