@@ -94,8 +94,11 @@ final class AppEnvironment {
         self.catalog = try CatalogStore.open(atPath: catalogURL.path)
         self.storage = try ManagedStorage(rootURL: supportDirectory.appendingPathComponent("library", isDirectory: true))
         self.renderer = PDFKitPageRenderer(storage: storage)
-        self.profiles = Self.loadProfiles(from: supportDirectory) ?? []
-        self.activeProfileID = profiles.first?.id
+        let loadedProfiles = Self.loadProfiles(from: supportDirectory) ?? []
+        self.profiles = loadedProfiles
+        // Read the local, not self.profiles: stored vars cannot be read
+        // until every stored property is initialized.
+        self.activeProfileID = loadedProfiles.first?.id
 
         if let scenario {
             // Deterministic scenario mode: injected transport, seeded state.
