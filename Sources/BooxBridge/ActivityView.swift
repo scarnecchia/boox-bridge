@@ -91,7 +91,6 @@ struct ActivityView: View {
             }
         }
         .navigationTitle("Activity")
-        .frame(minWidth: 440, minHeight: 380)
         .onAppear { app.refreshLibrary() }
     }
 }

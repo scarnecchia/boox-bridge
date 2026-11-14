@@ -68,10 +68,19 @@ struct RootView: View {
             switch section {
             case .library:
                 LibraryView(selectedDocumentID: $selectedDocumentID)
+                    .navigationSplitViewColumnWidth(min: Metrics.contentColumnMinWidth,
+                                                    ideal: Metrics.contentColumnIdealWidth,
+                                                    max: Metrics.contentColumnMaxWidth)
             case .deviceFiles:
                 DeviceFilesView()
+                    .navigationSplitViewColumnWidth(min: Metrics.contentColumnMinWidth,
+                                                    ideal: Metrics.contentColumnIdealWidth,
+                                                    max: Metrics.contentColumnMaxWidth)
             case .activity:
                 ActivityView()
+                    .navigationSplitViewColumnWidth(min: Metrics.contentColumnMinWidth,
+                                                    ideal: Metrics.contentColumnIdealWidth,
+                                                    max: Metrics.contentColumnMaxWidth)
             }
         } detail: {
             switch section {

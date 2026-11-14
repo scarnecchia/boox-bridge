@@ -38,6 +38,7 @@ struct BooxBridgeApp: App {
             .task { await bootIfNeeded() }
         }
         .windowToolbarStyle(.unified)
+        .defaultSize(width: 1180, height: 740)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Sync Now") { Task { await environment?.syncNow() } }

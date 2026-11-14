@@ -25,7 +25,6 @@ struct DeviceFilesView: View {
             }
         }
         .navigationTitle("Device Files")
-        .frame(minWidth: 480, minHeight: 380)
     }
 
     private var browseRoot: RemotePath? {

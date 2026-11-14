@@ -39,7 +39,7 @@ struct DocumentDetailView: View {
         return VStack(spacing: 0) {
             HSplitView {
                 previewPane(document: document, pages: pages)
-                    .frame(minWidth: 300, maxWidth: .infinity)
+                    .frame(minWidth: Metrics.previewPaneMinWidth, maxWidth: .infinity)
                 transcriptPane(pages: pages, revisionID: revisionID)
                     .frame(minWidth: Metrics.transcriptEditorMinWidth, idealWidth: 420)
             }

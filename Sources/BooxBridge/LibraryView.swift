@@ -18,7 +18,6 @@ struct LibraryView: View {
             }
         }
         .navigationTitle("Library")
-        .frame(minWidth: 500, minHeight: 380)
         .onAppear { app.refreshLibrary() }
     }
 

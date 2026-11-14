@@ -8,9 +8,15 @@ import SwiftUI
 enum Metrics {
     static let paneHorizontalInset: CGFloat = 20
     static let rowSpacing: CGFloat = 10
+    // Column minimums must sum below the narrowest supported screen
+    // (1024pt): 220 sidebar + 320 content + 240 preview + 240 editor.
     static let sidebarMinWidth: CGFloat = 220
+    static let contentColumnMinWidth: CGFloat = 320
+    static let contentColumnIdealWidth: CGFloat = 460
+    static let contentColumnMaxWidth: CGFloat = 680
     static let detailMaxTextWidth: CGFloat = 680   // readable prose measure
-    static let transcriptEditorMinWidth: CGFloat = 320
+    static let transcriptEditorMinWidth: CGFloat = 240
+    static let previewPaneMinWidth: CGFloat = 240
     static let previewMaxDimension: CGFloat = 1400
 }
 
