@@ -1,0 +1,227 @@
+// fileTransferIntegration, uploadRaceAndDisconnect, remoteMutationPolicy.
+import Foundation
+import Testing
+@testable import BooxBridgeCore
+
+@Suite struct DeviceTransferTests {
+    let root = try! RemotePath("/sdcard/note")
+
+    func makeService(_ transport: FakeDeviceTransport) -> DeviceFileService {
+        DeviceFileService(transport: transport, serial: "78935a57", browseRoot: root)
+    }
+
+    // -- fileTransferIntegration -------------------------------------------
+
+    @Test func browsingListsDirectoriesFirstWithinRoot() async throws {
+        let transport = FakeDeviceTransport()
+        transport.seed(try root.appending("b.pdf"), data: Data("b".utf8))
+        transport.seed(try root.appending("sub").appending("a.pdf"), data: Data("a".utf8))
+        try transport.makeDirectory(remote: try root.appending("sub"), serial: "s")
+
+        let service = makeService(transport)
+        let entries = try await service.entries(in: root)
+        // Direct children only: sub/ (directory first) and b.pdf.
+        #expect(entries.count == 2)
+        #expect(entries[0].isDirectory && entries[0].name == "sub")
+        #expect(!entries[1].isDirectory && entries[1].name == "b.pdf")
+
+        let nested = try await service.entries(in: try root.appending("sub"))
+        #expect(nested.map(\.name) == ["a.pdf"])
+    }
+
+    @Test func operationsOutsideBrowseRootAreRejected() async throws {
+        let transport = FakeDeviceTransport()
+        let service = makeService(transport)
+        let outside = try RemotePath("/sdcard/other")
+        await #expect(throws: DeviceFileError.self) {
+            _ = try await service.entries(in: outside)
+        }
+        await #expect(throws: DeviceFileError.self) {
+            try await service.createFolder(named: "x", in: outside)
+        }
+        try await withTempDirectoryAsync { dir in
+            let local = dir.appendingPathComponent("f.txt")
+            try Data("x".utf8).write(to: local)
+            await #expect(throws: DeviceFileError.self) {
+                try await service.upload(localFile: local, toDirectory: outside, overwrite: false)
+            }
+            await #expect(throws: DeviceFileError.self) {
+                _ = try await service.download(files: [outside.appending("f.txt")], intoLocalDirectory: dir, overwrite: false)
+            }
+        }
+    }
+
+    @Test func downloadStagesThenMovesAndHonorsConsent() async throws {
+        let transport = FakeDeviceTransport()
+        transport.seed(try root.appending("export.pdf"), data: Data("%PDF-1.7 test".utf8))
+        let service = makeService(transport)
+
+        try await withTempDirectoryAsync { dir in
+            let written = try await service.download(
+                files: [try root.appending("export.pdf")], intoLocalDirectory: dir, overwrite: false
+            )
+            #expect(written.count == 1)
+            #expect(try String(contentsOf: written[0], encoding: .utf8) == "%PDF-1.7 test")
+
+            // Existing local file without consent → error, original kept.
+            try Data("existing".utf8).write(to: written[0])
+            await #expect(throws: DeviceFileError.self) {
+                _ = try await service.download(files: [try root.appending("export.pdf")], intoLocalDirectory: dir, overwrite: false)
+            }
+            #expect(try String(contentsOf: written[0], encoding: .utf8) == "existing")
+
+            // With consent, replaced.
+            _ = try await service.download(files: [try root.appending("export.pdf")], intoLocalDirectory: dir, overwrite: true)
+            #expect(try String(contentsOf: written[0], encoding: .utf8) == "%PDF-1.7 test")
+            // No staging leftovers.
+            let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix(".booxbridge-download-") }
+            #expect(leftovers.isEmpty)
+        }
+    }
+
+    @Test func uploadStagesUnderTempAndPublishesVerified() async throws {
+        let transport = FakeDeviceTransport()
+        let service = makeService(transport)
+
+        try await withTempDirectoryAsync { dir in
+            let local = dir.appendingPathComponent("notes.txt")
+            try Data("hello device".utf8).write(to: local)
+            try await service.upload(localFile: local, toDirectory: root, overwrite: false)
+
+            let files = transport.snapshotFiles()
+            #expect(files[try root.appending("notes.txt").raw] != nil)
+            #expect(try Data(contentsOf: local) == files[try root.appending("notes.txt").raw]!.data)
+            // No app temp remains on the device.
+            #expect(files.keys.filter { RemoteTempName.isAppOwnedTemp(($0 as NSString).lastPathComponent) }.isEmpty)
+        }
+    }
+
+    @Test func uploadToExistingRemoteNameRequiresUserAction() async throws {
+        let transport = FakeDeviceTransport()
+        transport.seed(try root.appending("notes.txt"), data: Data("old".utf8))
+        let service = makeService(transport)
+
+        try await withTempDirectoryAsync { dir in
+            let local = dir.appendingPathComponent("notes.txt")
+            try Data("new".utf8).write(to: local)
+            // Overwrite is disabled remotely: even with consent the user
+            // must handle the existing file on the device.
+            await #expect(throws: DeviceFileError.destinationExistsNeedsConfirmation(path: try root.appending("notes.txt").raw)) {
+                try await service.upload(localFile: local, toDirectory: root, overwrite: true)
+            }
+            // Nothing was pushed or mutated.
+            #expect(transport.snapshotFiles()[try root.appending("notes.txt").raw]!.data == Data("old".utf8))
+            #expect(transport.movedRemote.isEmpty && transport.removedRemote.isEmpty)
+        }
+    }
+
+    // -- uploadRaceAndDisconnect ---------------------------------------------
+
+    @Test func publishRaceAbortsAndCleansTempOnly() async throws {
+        let transport = FakeDeviceTransport()
+        let service = makeService(transport)
+        let destination = try root.appending("raced.txt")
+        transport.raceWriter = { path in
+            transport.seed(path, data: Data("concurrent writer".utf8))
+        }
+
+        try await withTempDirectoryAsync { dir in
+            let local = dir.appendingPathComponent("raced.txt")
+            try Data("our upload".utf8).write(to: local)
+            await #expect(throws: DeviceFileError.publishRace(path: destination.raw)) {
+                try await service.upload(localFile: local, toDirectory: root, overwrite: false)
+            }
+        }
+        // The concurrent writer's content is intact; our temp is cleaned.
+        #expect(transport.snapshotFiles()[destination.raw]!.data == Data("concurrent writer".utf8))
+        #expect(transport.removedRemote.allSatisfy { RemoteTempName.isAppOwnedTemp(($0 as NSString).lastPathComponent) })
+        #expect(transport.removedRemote.count == 1)
+    }
+
+    @Test func disconnectDuringUploadPreservesDeviceStateAndCleansTemp() async throws {
+        let transport = FakeDeviceTransport()
+        transport.failPush = true
+        let service = makeService(transport)
+
+        try await withTempDirectoryAsync { dir in
+            let local = dir.appendingPathComponent("upload.txt")
+            try Data("partial".utf8).write(to: local)
+            await #expect(throws: AdbClientError.self) {
+                try await service.upload(localFile: local, toDirectory: root, overwrite: false)
+            }
+        }
+        // Nothing landed; any temp the device might have received is
+        // reported through the cleanup path (recorded, app-owned only).
+        #expect(transport.snapshotFiles().isEmpty || transport.snapshotFiles().keys.allSatisfy {
+            RemoteTempName.isAppOwnedTemp(($0 as NSString).lastPathComponent)
+        })
+        #expect(transport.removedRemote.allSatisfy { RemoteTempName.isAppOwnedTemp(($0 as NSString).lastPathComponent) })
+    }
+
+    // -- remoteMutationPolicy -------------------------------------------------
+
+    @Test func importsNeverIssueRemoteMutations() async throws {
+        let transport = FakeDeviceTransport()
+        transport.seed(try root.appending("a.pdf"), data: Data("%PDF-1.7 x".utf8), mtime: 5)
+        // A changed mtime forces a full pull cycle (stat → pull → stat → hash).
+        transport.seed(try root.appending("b.pdf"), data: Data("%PDF-1.7 y".utf8), mtime: 6)
+
+        try await withTempDirectoryAsync { dir in
+            let catalog = try CatalogStore.open(atPath: dir.appendingPathComponent("c.sqlite").path)
+            let storage = try ManagedStorage(rootURL: dir.appendingPathComponent("lib", isDirectory: true))
+            let importer = DeviceImportService(
+                transport: transport, catalog: catalog, storage: storage,
+                hasher: SHA256Hasher(), validator: SniffingValidator(), clock: ManualClock()
+            )
+            _ = try await importer.sync(root: ImportRoot(
+                id: "r", serial: "78935a57", remoteRoot: root, displayName: "Notes", enrolledAt: Date()
+            ))
+            // A second sync re-lists (listing failure must never fabricate
+            // deletions) and still performs no mutations.
+            transport.failListing = true
+            _ = try? await importer.sync(root: ImportRoot(
+                id: "r", serial: "78935a57", remoteRoot: root, displayName: "Notes", enrolledAt: Date()
+            ))
+        }
+        #expect(transport.movedRemote.isEmpty)
+        #expect(transport.removedRemote.isEmpty)
+    }
+
+    @Test func adbClientRefusesToRemoveNonTempRemoteNames() async throws {
+        // The production client guards rm at the transport layer too.
+        let script = FileManager.default.temporaryDirectory
+            .appendingPathComponent("boox-fake-adb-\(UUID().uuidString).sh")
+        try "#!/bin/sh\nexit 0\n".write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let client = try AdbClient(executableURL: script)
+        let innocent = try root.appending("important.pdf")
+        await #expect(throws: AdbClientError.self) {
+            try await client.removeRemote(path: innocent, serial: "78935a57")
+        }
+        // Import-path commands never contain rm/mv in their argv.
+        for command in [AdbCommand.devices, .version,
+                        .listFiles(root: root, serial: "s"),
+                        .stat(remote: innocent, serial: "s"),
+                        .sha256(remote: innocent, serial: "s"),
+                        .pull(remote: innocent, intoLocalDirectory: "/tmp", serial: "s")] {
+            let argv = AdbCommandBuilder.argv(for: command).joined(separator: " ")
+            #expect(!argv.contains(" rm "), "import command must not remove: \(argv)")
+            #expect(!argv.contains(" mv "), "import command must not rename: \(argv)")
+        }
+    }
+
+    @Test func createFolderIsValidated() async throws {
+        let transport = FakeDeviceTransport()
+        let service = makeService(transport)
+        try await service.createFolder(named: "New Folder", in: root)
+        let entries = try await service.entries(in: root)
+        #expect(entries.first?.name == "New Folder" && entries.first?.isDirectory == true)
+
+        await #expect(throws: DeviceFileError.invalidName("..")) {
+            try await service.createFolder(named: "..", in: root)
+        }
+        await #expect(throws: DeviceFileError.invalidName("a/b")) {
+            try await service.createFolder(named: "a/b", in: root)
+        }
+    }
+}

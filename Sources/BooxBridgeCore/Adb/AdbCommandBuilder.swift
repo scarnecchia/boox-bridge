@@ -12,19 +12,40 @@
 
 import Foundation
 
-/// Every remote operation the app performs. There is deliberately no case
-/// for deletion or renaming — remoteMutationPolicy tests assert the enum
-/// stays mutation-free.
+/// Every remote operation the app performs. Sync/import uses the read-only
+/// cases only. `moveRemoteNoClobber` and `removeRemote` are REMOTE
+/// MUTATIONS: they exist solely for the explicit upload publish path and
+/// app-owned temporary cleanup in DeviceFileService, never for import
+/// (remoteMutationPolicy enforces this).
 public enum AdbCommand: Equatable, Sendable {
     case version
     case devices
     case stat(remote: RemotePath, serial: String)
     case sha256(remote: RemotePath, serial: String)
     case listFiles(root: RemotePath, serial: String)
+    case listEntries(root: RemotePath, serial: String)
     case pull(remote: RemotePath, intoLocalDirectory: String, serial: String)
     case push(localPath: String, toRemote: RemotePath, serial: String)
     case makeDirectory(remote: RemotePath, serial: String)
     case deviceProperty(name: String, serial: String)
+    /// `mv -n`: move without overwriting an existing destination.
+    case moveRemoteNoClobber(from: RemotePath, to: RemotePath, serial: String)
+    /// Remove a remote file (app-owned temporary names only).
+    case removeRemote(path: RemotePath, serial: String)
+}
+
+/// Marker prefix for app-owned remote temporary upload names. Cleanup is
+/// only ever issued for names the app created with this prefix.
+public enum RemoteTempName {
+    public static let prefix = ".booxbridge-upload-"
+
+    public static func tempName(for fileName: String) -> String {
+        "\(prefix)\(UUID().uuidString)-\(fileName)"
+    }
+
+    public static func isAppOwnedTemp(_ name: String) -> Bool {
+        name.hasPrefix(prefix)
+    }
 }
 
 public enum AdbCommandBuilder {
@@ -41,6 +62,10 @@ public enum AdbCommandBuilder {
             return scoped(serial, ["shell", "sha256sum -- " + ShellQuoting.quote(remote)])
         case .listFiles(let root, let serial):
             return scoped(serial, ["shell", listingScript(for: root)])
+        case .listEntries(let root, let serial):
+            // Same record format, no -type filter: directories included so
+            // the file browser can navigate. Callers filter by kind.
+            return scoped(serial, ["shell", listingScript(for: root, filesOnly: false)])
         case .pull(let remote, let localDirectory, let serial):
             return scoped(serial, ["pull", remote.raw, localDirectory])
         case .push(let localPath, let remote, let serial):
@@ -49,20 +74,25 @@ public enum AdbCommandBuilder {
             return scoped(serial, ["shell", "mkdir -p -- " + ShellQuoting.quote(remote)])
         case .deviceProperty(let name, let serial):
             return scoped(serial, ["shell", "getprop " + ShellQuoting.quote(name)])
+        case .moveRemoteNoClobber(let from, let to, let serial):
+            return scoped(serial, ["shell", "mv -n -- " + ShellQuoting.quote(from) + " " + ShellQuoting.quote(to)])
+        case .removeRemote(let path, let serial):
+            return scoped(serial, ["shell", "rm -f -- " + ShellQuoting.quote(path)])
         }
     }
 
-    /// NUL-delimited listing: for each regular file under `root`, emit
+    /// NUL-delimited listing: for each entry under `root`, emit
     /// "size|mtime|kind<TAB>path" followed by a NUL byte. Metadata sits
     /// before the tab so the path may legally contain tabs, spaces,
     /// newlines, quotes, and leading hyphens.
     ///
     /// The inner sh -c script uses only double quotes, so it can be safely
     /// single-quoted by ShellQuoting inside the outer script.
-    static func listingScript(for root: RemotePath) -> String {
+    static func listingScript(for root: RemotePath, filesOnly: Bool = true) -> String {
         let inner = "printf \"%s\\t\" \"$(stat -c '%s|%Y|%F' -- \"$1\")\"; printf \"%s\\0\" \"$1\""
             .replacingOccurrences(of: "'", with: "'\\''")
-        return "find \(ShellQuoting.quote(root)) -type f -exec sh -c '"
+        let typeFilter = filesOnly ? " -type f" : ""
+        return "find \(ShellQuoting.quote(root))\(typeFilter) -exec sh -c '"
             + inner
             + "' sh {} +"
     }
@@ -102,11 +132,15 @@ public enum RemoteListingParser {
         }
     }
 
-    /// Parse the NUL-delimited output of listFiles. Records are strict: any
-    /// malformed or out-of-root record fails the whole listing rather than
-    /// being dropped — a partial listing must never be treated as
-    /// authoritative (that would fabricate remote deletions).
+    /// Parse the NUL-delimited output of listFiles/listEntries. Records are
+    /// strict: any malformed or out-of-root record fails the whole listing
+    /// rather than being dropped — a partial listing must never be treated
+    /// as authoritative (that would fabricate remote deletions).
     public static func parse(_ data: Data, root: RemotePath) throws -> [RemoteFileRecord] {
+        try parse(data, root: root, includingDirectories: false)
+    }
+
+    public static func parse(_ data: Data, root: RemotePath, includingDirectories: Bool) throws -> [RemoteFileRecord] {
         var records: [RemoteFileRecord] = []
         var start = data.startIndex
 
@@ -144,6 +178,6 @@ public enum RemoteListingParser {
                 isRegularFile: kind.contains("regular file")
             ))
         }
-        return records.filter(\.isRegularFile)
+        return includingDirectories ? records : records.filter(\.isRegularFile)
     }
 }

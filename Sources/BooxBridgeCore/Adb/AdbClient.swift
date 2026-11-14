@@ -83,6 +83,14 @@ public actor AdbClient: DeviceTransport {
         return try RemoteListingParser.parse(result.stdout, root: root)
     }
 
+    public func listEntries(root: RemotePath, serial: String) async throws -> [RemoteFileRecord] {
+        let result = try await dispatch(.listEntries(root: root, serial: serial))
+        guard result.succeeded else {
+            throw AdbClientError.commandFailed(command: "find \(root)", reason: stderrSummary(result))
+        }
+        return try RemoteListingParser.parse(result.stdout, root: root, includingDirectories: true)
+    }
+
     public func stat(remote: RemotePath, serial: String) async throws -> RemoteFileRecord? {
         let result = try await dispatch(.stat(remote: remote, serial: serial))
         guard result.succeeded else { return nil }
@@ -137,6 +145,26 @@ public actor AdbClient: DeviceTransport {
         }
     }
 
+    public func moveRemoteNoClobber(from: RemotePath, to: RemotePath, serial: String) async throws {
+        let result = try await dispatch(.moveRemoteNoClobber(from: from, to: to, serial: serial))
+        guard result.succeeded else {
+            throw AdbClientError.commandFailed(command: "mv \(from) → \(to)", reason: stderrSummary(result))
+        }
+    }
+
+    public func removeRemote(path: RemotePath, serial: String) async throws {
+        guard RemoteTempName.isAppOwnedTemp(path.lastComponent) else {
+            throw AdbClientError.commandFailed(
+                command: "rm",
+                reason: "refusing to remove non-temporary remote name \(path.raw)"
+            )
+        }
+        let result = try await dispatch(.removeRemote(path: path, serial: serial))
+        guard result.succeeded else {
+            throw AdbClientError.commandFailed(command: "rm \(path)", reason: stderrSummary(result))
+        }
+    }
+
     // MARK: - Internals
 
     private func dispatch(_ command: AdbCommand) async throws -> ProcessResult {
@@ -177,10 +205,13 @@ public actor AdbClient: DeviceTransport {
         case .stat: return "stat"
         case .sha256: return "sha256sum"
         case .listFiles: return "find"
+        case .listEntries: return "find"
         case .pull: return "pull"
         case .push: return "push"
         case .makeDirectory: return "mkdir"
         case .deviceProperty: return "getprop"
+        case .moveRemoteNoClobber: return "mv"
+        case .removeRemote: return "rm"
         }
     }
 

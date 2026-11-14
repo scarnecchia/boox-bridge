@@ -14,6 +14,7 @@ final class FakeDeviceTransport: DeviceTransport, @unchecked Sendable {
 
     private let lock = NSLock()
     private var files: [String: FakeFile] = [:]
+    private var directories: Set<String> = []
     private var statCounts: [String: Int] = [:]
     private(set) var listCalls = 0
     private(set) var pullCalls = 0
@@ -25,6 +26,14 @@ final class FakeDeviceTransport: DeviceTransport, @unchecked Sendable {
     var corruptRemoteHash = false
     /// When true, listFiles throws — simulating a disconnect mid-sync.
     var failListing = false
+    /// When true, push throws — simulating a disconnect mid-upload.
+    var failPush = false
+    /// When set, this closure runs right before the post-publish stat,
+    /// letting tests create the destination concurrently (publish race).
+    var raceWriter: ((RemotePath) -> Void)?
+
+    private(set) var movedRemote: [(from: String, to: String)] = []
+    private(set) var removedRemote: [String] = []
 
     func seed(_ path: RemotePath, data: Data, mtime: Int64 = 1_000) {
         lock.lock(); defer { lock.unlock() }
@@ -100,12 +109,62 @@ final class FakeDeviceTransport: DeviceTransport, @unchecked Sendable {
     }
 
     func push(localFile: URL, toRemote: RemotePath, serial: String) throws {
+        if failPush {
+            throw AdbClientError.commandFailed(command: "push", reason: "device disconnected")
+        }
         let data = try Data(contentsOf: localFile)
         lock.lock(); defer { lock.unlock() }
         files[toRemote.raw] = FakeFile(data: data, mtime: 9_999)
     }
 
-    func makeDirectory(remote: RemotePath, serial: String) throws {}
+    func makeDirectory(remote: RemotePath, serial: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        directories.insert(remote.raw)
+    }
+
+    func moveRemoteNoClobber(from: RemotePath, to: RemotePath, serial: String) throws {
+        // Test hook runs BEFORE taking the lock: it seeds the destination,
+        // and seeding takes the same (non-recursive) lock.
+        raceWriter?(to)
+        lock.lock(); defer { lock.unlock() }
+        movedRemote.append((from.raw, to.raw))
+        guard files[from.raw] != nil || directories.contains(from.raw) else {
+            throw AdbClientError.commandFailed(command: "mv", reason: "source missing")
+        }
+        // mv -n: never overwrite an existing destination.
+        guard files[to.raw] == nil && !directories.contains(to.raw) else { return }
+        if let file = files.removeValue(forKey: from.raw) {
+            files[to.raw] = file
+        } else if directories.remove(from.raw) != nil {
+            directories.insert(to.raw)
+        }
+    }
+
+    func removeRemote(path: RemotePath, serial: String) throws {
+        guard RemoteTempName.isAppOwnedTemp(path.lastComponent) else {
+            throw AdbClientError.commandFailed(command: "rm", reason: "refusing non-temp name")
+        }
+        lock.lock(); defer { lock.unlock() }
+        removedRemote.append(path.raw)
+        files.removeValue(forKey: path.raw)
+    }
+
+    func listEntries(root: RemotePath, serial: String) throws -> [RemoteFileRecord] {
+        lock.lock(); defer { lock.unlock() }
+        listCalls += 1
+        if failListing { throw AdbClientError.commandFailed(command: "find", reason: "device disconnected") }
+        var records = files
+            .filter { $0.key.hasPrefix(root.raw + "/") }
+            .map { key, value in
+                RemoteFileRecord(path: try! RemotePath(key), sizeBytes: value.sizeBytes,
+                                 modifiedEpochSeconds: value.mtime, isRegularFile: true)
+            }
+        for directory in directories where directory.hasPrefix(root.raw + "/") {
+            records.append(RemoteFileRecord(path: try! RemotePath(directory), sizeBytes: 0,
+                                            modifiedEpochSeconds: 0, isRegularFile: false))
+        }
+        return records.sorted { $0.path.raw < $1.path.raw }
+    }
 
     func listDevices() throws -> [DeviceEntry] { [] }
     func deviceProperties(serial: String, names: [String]) throws -> [String: String] { [:] }
