@@ -238,6 +238,102 @@ struct FixedRenderer: PageRendering {
         }
     }
 
+    /// Integration proof: a 429 with Retry-After must make the drain loop
+    /// sleep the provider-directed delay. The pure classifier test above
+    /// passes either way — only observing the drain's actual sleep catches
+    /// the delay being discarded between execute() and the requeue.
+    @Test func drainHonorsProviderRetryAfter() async throws {
+        try await withTempDirectoryAsync { dir in
+            let transport = ScriptedTransport()
+            let clock = ManualClock()
+            let catalog = try CatalogStore.open(atPath: dir.appendingPathComponent("c.sqlite").path)
+            let credentials = InMemoryCredentialStore()
+            var limits = OcrRunnerLimits()
+            limits.retry = RetryLimits(maxAttempts: 4, baseBackoffSeconds: 2, maxBackoffSeconds: 60, maxRetryAfterSeconds: 300)
+            let runner = OcrRunner(catalog: catalog, transport: transport, credentials: credentials,
+                                   renderer: FixedRenderer(), clock: clock, limits: limits)
+            try credentials.saveSecret("k-1", forProfileID: "p1")
+            let profile = ProviderProfile(id: "p1", displayName: "P", kind: .openAI,
+                                          baseURL: URL(string: "https://api.example.com/v1")!, modelID: "m")
+            let (_, revisionID) = try seedDocument(catalog: catalog)
+            _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
+                                       modelID: "m", promptVersion: 1, at: Date())
+
+            transport.enqueue(HTTPResponse(
+                status: 429, headers: ["retry-after": "37"],
+                body: Data(#"{"error":{"message":"slow down"}}"#.utf8)
+            ))
+            transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"page text"}]}]}"#.utf8)))
+            await runner.drain(profileResolver: { $0 == "p1" ? profile : nil })
+
+            // Exactly one requeue sleep, and it is the provider's 37s — not
+            // the 2s local initial backoff the drain used to fall back to.
+            #expect(clock.recordedSleeps == [37])
+            let job = try catalog.jobs(revisionID: revisionID).first!
+            #expect(job.state == .succeeded)
+            #expect(job.attempts == 2)
+            #expect(try catalog.pages(revisionID: revisionID)[0].rawTranscription == "page text")
+        }
+    }
+
+    @Test func drainHonorsHTTPDateRetryAfter() async throws {
+        try await withTempDirectoryAsync { dir in
+            let transport = ScriptedTransport()
+            let clock = ManualClock()
+            let catalog = try CatalogStore.open(atPath: dir.appendingPathComponent("c.sqlite").path)
+            let credentials = InMemoryCredentialStore()
+            let runner = OcrRunner(catalog: catalog, transport: transport, credentials: credentials,
+                                   renderer: FixedRenderer(), clock: clock)
+            try credentials.saveSecret("k-1", forProfileID: "p1")
+            let profile = ProviderProfile(id: "p1", displayName: "P", kind: .openAI,
+                                          baseURL: URL(string: "https://api.example.com/v1")!, modelID: "m")
+            let (_, revisionID) = try seedDocument(catalog: catalog)
+            _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
+                                       modelID: "m", promptVersion: 1, at: Date())
+
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+            let header = formatter.string(from: Date().addingTimeInterval(15))
+            transport.enqueue(HTTPResponse(status: 429, headers: ["retry-after": header], body: Data()))
+            transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"page text"}]}]}"#.utf8)))
+            await runner.drain(profileResolver: { _ in profile })
+
+            #expect(clock.recordedSleeps.count == 1)
+            let slept = clock.recordedSleeps.first ?? -1
+            #expect(slept >= 12 && slept <= 20)
+        }
+    }
+
+    @Test func drainCapsProviderRetryAfter() async throws {
+        try await withTempDirectoryAsync { dir in
+            let transport = ScriptedTransport()
+            let clock = ManualClock()
+            let catalog = try CatalogStore.open(atPath: dir.appendingPathComponent("c.sqlite").path)
+            let credentials = InMemoryCredentialStore()
+            var limits = OcrRunnerLimits()
+            limits.retry = RetryLimits(maxAttempts: 4, baseBackoffSeconds: 2, maxBackoffSeconds: 60, maxRetryAfterSeconds: 300)
+            let runner = OcrRunner(catalog: catalog, transport: transport, credentials: credentials,
+                                   renderer: FixedRenderer(), clock: clock, limits: limits)
+            try credentials.saveSecret("k-1", forProfileID: "p1")
+            let profile = ProviderProfile(id: "p1", displayName: "P", kind: .openAI,
+                                          baseURL: URL(string: "https://api.example.com/v1")!, modelID: "m")
+            let (_, revisionID) = try seedDocument(catalog: catalog)
+            _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
+                                       modelID: "m", promptVersion: 1, at: Date())
+
+            // A hostile or stuck header must not stall the queue for hours.
+            transport.enqueue(HTTPResponse(status: 429, headers: ["retry-after": "99999"], body: Data()))
+            transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"page text"}]}]}"#.utf8)))
+            await runner.drain(profileResolver: { _ in profile })
+
+            #expect(clock.recordedSleeps == [300])
+            let job = try catalog.jobs(revisionID: revisionID).first!
+            #expect(job.state == .succeeded)
+            #expect(job.attempts == 2)
+        }
+    }
+
 
     @Test func capabilityProbeScenarios() async throws {
         try await withTempDirectoryAsync { dir in
