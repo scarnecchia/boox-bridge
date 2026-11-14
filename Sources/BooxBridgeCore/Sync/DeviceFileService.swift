@@ -2,6 +2,12 @@
 
 import Foundation
 
+#if canImport(Glibc)
+import Glibc
+#else
+import Darwin
+#endif
+
 public enum DeviceFileError: Error, Equatable, Sendable, CustomStringConvertible {
     case outsideBrowseRoot(path: String, root: String)
     case destinationExistsNeedsConfirmation(path: String)
@@ -63,7 +69,9 @@ public actor DeviceFileService {
 
     /// Download remote files into a local directory the user chose. Each
     /// file lands under a unique staging name first, then moves into place;
-    /// an existing local file is only replaced with explicit consent.
+    /// an existing local file is only replaced with explicit consent — and
+    /// the consent decision is re-checked AFTER the pull completes, because
+    /// the destination can appear while the copy is in flight.
     public func download(
         files: [RemotePath],
         intoLocalDirectory directory: URL,
@@ -83,10 +91,21 @@ public actor DeviceFileService {
             try fm.createDirectory(at: staging, withIntermediateDirectories: true)
             do {
                 let staged = try await transport.pull(remote: file, intoStagingDirectory: staging, serial: serial)
+                // The pull awaited above can take a long time; another
+                // process (or a reentrant download) may have created the
+                // destination meanwhile, so the pre-pull consent check is
+                // stale. Publishing here used to removeItem (recursively!)
+                // whatever had appeared, destroying bytes the consent
+                // decision never saw.
                 if fm.fileExists(atPath: destination.path) {
-                    try fm.removeItem(at: destination)
+                    guard overwrite else {
+                        // No-clobber: never touch bytes we never saw.
+                        throw DeviceFileError.destinationExistsNeedsConfirmation(path: destination.lastPathComponent)
+                    }
+                    try replaceAtomically(at: destination, with: staged)
+                } else {
+                    try fm.moveItem(at: staged, to: destination)
                 }
-                try fm.moveItem(at: staged, to: destination)
                 try? fm.removeItem(at: staging)
                 written.append(destination)
             } catch {
@@ -95,6 +114,19 @@ public actor DeviceFileService {
             }
         }
         return written
+    }
+
+    /// Swap `source` in over `destination` in one atomic step: if the
+    /// replacement fails for any reason, the previous bytes stay intact.
+    /// Direct rename(2) provides that guarantee; remove-then-move would
+    /// leave a window where the destination is missing — and any failure
+    /// after the remove destroys the original.
+    private func replaceAtomically(at destination: URL, with source: URL) throws {
+        if rename(source.path, destination.path) != 0 {
+            // errno after a failed call is always a defined POSIX value;
+            // the failable initializer only needs a defensive fallback.
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     /// Upload a local file into a remote folder inside the browse root.

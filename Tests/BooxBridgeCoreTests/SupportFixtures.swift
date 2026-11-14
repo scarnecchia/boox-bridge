@@ -29,6 +29,10 @@ final class FakeDeviceTransport: DeviceTransport, @unchecked Sendable {
     /// When set, this closure runs right before the post-publish stat,
     /// letting tests create the destination concurrently (publish race).
     var raceWriter: ((RemotePath) -> Void)?
+    /// When set, this closure runs at the start of pull, before any state
+    /// is read: the pull is then "in flight" and the test can create a
+    /// local destination mid-download (the mid-flight overwrite race).
+    var onPull: ((RemotePath) -> Void)?
 
     private(set) var movedRemote: [(from: String, to: String)] = []
     private(set) var removedRemote: [String] = []
@@ -96,6 +100,10 @@ final class FakeDeviceTransport: DeviceTransport, @unchecked Sendable {
     }
 
     func pull(remote: RemotePath, intoStagingDirectory: URL, serial: String) throws -> URL {
+        // Test hook runs BEFORE taking the lock (same pattern as
+        // raceWriter): it models a competitor acting while the copy is in
+        // flight, and seeding/writing inside it must not self-deadlock.
+        onPull?(remote)
         lock.lock(); defer { lock.unlock() }
         pullCalls += 1
         guard let f = files[remote.raw] else {

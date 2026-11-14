@@ -73,6 +73,88 @@ import Testing
         }
     }
 
+    /// Regression test for the mid-flight overwrite race: the only consent
+    /// check used to run BEFORE the pull, and publication then removed
+    /// (recursively) and replaced whatever had appeared in the meantime —
+    /// destroying bytes the consent decision never saw. A destination that
+    /// materializes while the pull is in flight must produce a conflict,
+    /// with its bytes untouched.
+    @Test func downloadConflictsWhenDestinationAppearsMidFlight() async throws {
+        let transport = FakeDeviceTransport()
+        let remote = try root.appending("export.pdf")
+        transport.seed(remote, data: Data("%PDF-1.7 test".utf8))
+        let service = makeService(transport)
+
+        try await withTempDirectoryAsync { dir in
+            let destination = dir.appendingPathComponent("export.pdf")
+            let competitor = Data("mid-flight original".utf8)
+            transport.onPull = { _ in
+                try? competitor.write(to: destination)
+            }
+            await #expect(throws: DeviceFileError.destinationExistsNeedsConfirmation(path: destination.lastPathComponent)) {
+                _ = try await service.download(files: [remote], intoLocalDirectory: dir, overwrite: false)
+            }
+            // The mid-flight file's bytes are exactly as the other writer
+            // left them — not the staged download content.
+            #expect(try Data(contentsOf: destination) == competitor)
+            // Staging is cleaned up; no orphaned download directories.
+            let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+                .filter { $0.hasPrefix(".booxbridge-download-") }
+            #expect(leftovers.isEmpty)
+        }
+    }
+
+    /// With explicit consent, a destination that appears mid-flight is
+    /// replaced — atomically, so publication cannot expose a half-state.
+    @Test func downloadOverwriteReplacesDestinationAppearedMidFlight() async throws {
+        let transport = FakeDeviceTransport()
+        let remote = try root.appending("export.pdf")
+        transport.seed(remote, data: Data("%PDF-1.7 test".utf8))
+        let service = makeService(transport)
+
+        try await withTempDirectoryAsync { dir in
+            let destination = dir.appendingPathComponent("export.pdf")
+            transport.onPull = { _ in
+                try? Data("mid-flight original".utf8).write(to: destination)
+            }
+            let written = try await service.download(files: [remote], intoLocalDirectory: dir, overwrite: true)
+            #expect(written == [destination])
+            #expect(try Data(contentsOf: destination) == Data("%PDF-1.7 test".utf8))
+            let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+                .filter { $0.hasPrefix(".booxbridge-download-") }
+            #expect(leftovers.isEmpty)
+        }
+    }
+
+    /// A failed overwrite publication must preserve the existing
+    /// destination byte-for-byte: rename(2) refuses to replace a directory
+    /// with a file, and the previous remove-then-move would have deleted
+    /// that directory (recursively) before failing. The directory created
+    /// mid-flight here survives with its contents.
+    @Test func failedOverwritePublicationPreservesExistingDestination() async throws {
+        let transport = FakeDeviceTransport()
+        let remote = try root.appending("export.pdf")
+        transport.seed(remote, data: Data("%PDF-1.7 test".utf8))
+        let service = makeService(transport)
+
+        try await withTempDirectoryAsync { dir in
+            let destination = dir.appendingPathComponent("export.pdf")
+            let keep = destination.appendingPathComponent("keep.txt")
+            transport.onPull = { _ in
+                try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+                try? Data("inside".utf8).write(to: keep)
+            }
+            await #expect(throws: POSIXError.self) {
+                _ = try await service.download(files: [remote], intoLocalDirectory: dir, overwrite: true)
+            }
+            #expect(FileManager.default.fileExists(atPath: keep.path))
+            #expect(try Data(contentsOf: keep) == Data("inside".utf8))
+            let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+                .filter { $0.hasPrefix(".booxbridge-download-") }
+            #expect(leftovers.isEmpty)
+        }
+    }
+
     @Test func uploadStagesUnderTempAndPublishesVerified() async throws {
         let transport = FakeDeviceTransport()
         let service = makeService(transport)
