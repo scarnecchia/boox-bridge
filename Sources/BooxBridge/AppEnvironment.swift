@@ -443,18 +443,23 @@ final class AppEnvironment {
     var isOCRDraining: Bool { drainOwnership.isOwned }
 
     /// Start (or chain-start) the queue drain. The OCRDrainOwnership state
-    /// machine keeps exactly one runner: a start while a drain is live cancels
-    /// the live task and relaunches on its actual termination, so the store's
-    /// nextQueuedJob→mark-running claim — which is not atomic across
+    /// machine keeps exactly one runner: a start while a drain is live only
+    /// arms a chained restart and never cancels in-flight work (the live
+    /// drain loop re-claims the queue every iteration, so new pages usually
+    /// join the current run; if it was already finishing, the chained drain
+    /// launches on its actual termination). Exactly one runner means the
+    /// store's nextQueuedJob→mark-running claim — which is not atomic across
     /// concurrent runners — can never be raced by two in-process runners.
     func startOCRDrain() {
         switch drainOwnership.requestStart() {
         case .launch(let generation):
             spawnDrain(generation: generation)
-        case .cancelLive(let generation):
-            cancelDrainTask(generation: generation)
-            appendActivity(title: "OCR restarting",
-                           detail: "Waiting for the current run to stop before starting the new pages.")
+        case .restartArmed:
+            // Deliberately no cancellation: aborting the live run would mark
+            // its in-flight page terminally failed and waste the billed
+            // request; the queued pages flow without interruption instead.
+            appendActivity(title: "OCR pages queued",
+                           detail: "The running transcription continues and picks the new pages up without interruption.")
         }
     }
 
@@ -532,13 +537,17 @@ final class AppEnvironment {
     }
 
     func cancelOCRDrain() {
-        guard let generation = drainOwnership.generationToCancel() else {
+        // requestCancel also disarms any restart a mid-run start armed, so a
+        // user stop can never chain into further paid OCR work once the
+        // cancelled task reports its actual termination.
+        switch drainOwnership.requestCancel() {
+        case .idle:
             appendActivity(title: "OCR idle", detail: "No transcription is running.")
-            return
+        case .cancel(let generation):
+            cancelDrainTask(generation: generation)
+            appendActivity(title: "OCR cancelling",
+                           detail: "Stopping at the next page boundary. A request already sent may still have been billed.")
         }
-        cancelDrainTask(generation: generation)
-        appendActivity(title: "OCR cancelling",
-                       detail: "Stopping at the next page boundary. A request already sent may still have been billed.")
     }
 
     /// Re-enqueue a terminal job with its original identity. Non-nil counts

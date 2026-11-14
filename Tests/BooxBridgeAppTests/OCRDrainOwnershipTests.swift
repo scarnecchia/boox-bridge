@@ -3,28 +3,98 @@
 import XCTest
 @testable import BooxBridge
 
-/// Regression tests for the OCR drain ownership state machine. Before the
-/// generation token, cancelOCRDrain cleared the task handle immediately and
-/// the finished task's unconditional cleanup cleared whatever handle was
-/// current — a cancelled-but-still-draining task could erase a newer drain's
-/// ownership, allowing overlapping runners to race the store's non-atomic
-/// queue claim.
+/// Regression tests for the OCR drain ownership state machine.
+///
+/// Round-2 transition-table contract:
+/// - Before this change a start request while a drain was live returned
+///   `.cancelLive` and the environment cancelled the in-flight task; the core
+///   recorded the interrupted page as terminally failed and the billed
+///   request was wasted. Now `requestStart` arms a chained restart and the
+///   live task keeps running.
+/// - Before this change an explicit Cancel only cancelled the current task
+///   and never cleared the armed restart: start → start (armed) → cancel →
+///   finish still relaunched and sent paid OCR work after the user's stop.
+///   Now `requestCancel` disarms the restart and ownership is retained until
+///   the task actually reports finish.
 final class OCRDrainOwnershipTests: XCTestCase {
-    func test_cancelRetainsOwnershipUntilActualTermination() {
+    func test_startWhileLiveArmsRestartWithoutCancellingInFlightWork() {
         var ownership = OCRDrainOwnership()
         guard case .launch(let first) = ownership.requestStart() else {
             return XCTFail("first start must launch")
         }
-        // Cancellation keeps ownership: the in-flight request may still be
-        // draining, so a second runner must not start yet.
-        XCTAssertEqual(ownership.generationToCancel(), first)
-        XCTAssertTrue(ownership.isOwned, "cancel must not release ownership")
+        // The live task keeps running: no cancellation is handed out, and
+        // ownership stays with the in-flight generation.
+        guard case .restartArmed(let live) = ownership.requestStart() else {
+            return XCTFail("start while live must arm a restart, never cancel the live task")
+        }
+        XCTAssertEqual(live, first)
+        XCTAssertEqual(ownership.generationToCancel(), first,
+                       "the in-flight generation must stay the live owner")
+        XCTAssertTrue(ownership.isOwned)
 
-        guard case .release = ownership.taskDidFinish(generation: first) else {
-            return XCTFail("the owning generation's finish must release")
+        // Exactly one relaunch when the live drain actually finishes.
+        guard case .relaunch(let second) = ownership.taskDidFinish(generation: first) else {
+            return XCTFail("finish with an armed restart must relaunch exactly once")
+        }
+        XCTAssertNotEqual(second, first)
+        guard case .release = ownership.taskDidFinish(generation: second) else {
+            return XCTFail("the chained drain finishes normally")
         }
         XCTAssertFalse(ownership.isOwned)
-        XCTAssertNil(ownership.generationToCancel())
+    }
+
+    func test_explicitCancelDisarmsRestartAndReleasesOnActualTermination() {
+        var ownership = OCRDrainOwnership()
+        guard case .launch(let first) = ownership.requestStart() else {
+            return XCTFail("start must launch")
+        }
+        guard case .restartArmed = ownership.requestStart() else {
+            return XCTFail("second start must arm a restart")
+        }
+        // The user's stop wins: the armed restart is disarmed and the live
+        // task is cancelled — but ownership is retained until termination so
+        // the completion still resolves safely.
+        guard case .cancel(let cancelled) = ownership.requestCancel() else {
+            return XCTFail("cancel while live must hand out the generation to cancel")
+        }
+        XCTAssertEqual(cancelled, first)
+        XCTAssertTrue(ownership.isOwned, "cancel must retain ownership until the task actually finishes")
+        XCTAssertEqual(ownership.generationToCancel(), first)
+
+        guard case .release = ownership.taskDidFinish(generation: first) else {
+            return XCTFail("a cancelled, disarmed finish must release — never relaunch paid work")
+        }
+        XCTAssertFalse(ownership.isOwned)
+        XCTAssertNil(ownership.generationToCancel(), "generation must be released on termination")
+    }
+
+    func test_cancelWhileIdleIsNoop() {
+        var ownership = OCRDrainOwnership()
+        guard case .idle = ownership.requestCancel() else {
+            return XCTFail("cancel with no drain must be a no-op")
+        }
+        XCTAssertFalse(ownership.isOwned)
+    }
+
+    func test_cancelThenStartWhileStillLiveChainsRestartOnLastAction() {
+        var ownership = OCRDrainOwnership()
+        guard case .launch(let first) = ownership.requestStart() else {
+            return XCTFail("start must launch")
+        }
+        guard case .restartArmed = ownership.requestStart() else {
+            return XCTFail("second start must arm a restart")
+        }
+        guard case .cancel = ownership.requestCancel() else {
+            return XCTFail("cancel must disarm")
+        }
+        // The user restarts before the cancelled task actually finished: the
+        // last action wins, so the finish chains a relaunch again.
+        guard case .restartArmed = ownership.requestStart() else {
+            return XCTFail("a start after cancel while still live must re-arm the restart")
+        }
+        guard case .relaunch = ownership.taskDidFinish(generation: first) else {
+            return XCTFail("finish after a re-armed restart must relaunch")
+        }
     }
 
     func test_staleCompletionNeverClearsNewerOwner() {
@@ -32,16 +102,11 @@ final class OCRDrainOwnershipTests: XCTestCase {
         guard case .launch(let first) = ownership.requestStart() else {
             return XCTFail("first start must launch")
         }
-        guard case .cancelLive(let cancelled) = ownership.requestStart() else {
-            return XCTFail("start while live must cancel the live generation")
+        guard case .restartArmed = ownership.requestStart() else {
+            return XCTFail("start while live must arm a restart")
         }
-        XCTAssertEqual(cancelled, first)
-
-        // The old task terminates; a start was requested meanwhile, so its
-        // completion chains the relaunch instead of releasing into an idle
-        // state that would double-claim.
         guard case .relaunch(let second) = ownership.taskDidFinish(generation: first) else {
-            return XCTFail("finish with a pending restart must relaunch")
+            return XCTFail("finish with an armed restart must relaunch")
         }
         XCTAssertTrue(ownership.isOwned)
         XCTAssertEqual(ownership.generationToCancel(), second)
@@ -56,33 +121,13 @@ final class OCRDrainOwnershipTests: XCTestCase {
         XCTAssertEqual(ownership.generationToCancel(), second, "stale completion clobbered the newer owner")
     }
 
-    func test_startWhileLiveChainsRestartOnActualTermination() {
-        var ownership = OCRDrainOwnership()
-        guard case .launch(let first) = ownership.requestStart() else {
-            return XCTFail("first start must launch")
-        }
-        // While the first generation owns the drain, no second launch may be
-        // handed out — overlapping runners would double-claim queued jobs.
-        guard case .cancelLive = ownership.requestStart() else {
-            return XCTFail("second start while live must cancel, never launch")
-        }
-        guard case .relaunch(let second) = ownership.taskDidFinish(generation: first) else {
-            return XCTFail("chained relaunch must wait for actual termination")
-        }
-        XCTAssertNotEqual(second, first)
-        guard case .release = ownership.taskDidFinish(generation: second) else {
-            return XCTFail("chained drain finishes normally")
-        }
-        XCTAssertFalse(ownership.isOwned)
-    }
-
     func test_finishWithoutPendingStartReleases() {
         var ownership = OCRDrainOwnership()
         guard case .launch(let first) = ownership.requestStart() else {
             return XCTFail("start must launch")
         }
         guard case .release = ownership.taskDidFinish(generation: first) else {
-            return XCTFail("finish with no pending restart must release")
+            return XCTFail("finish with no armed restart must release")
         }
         XCTAssertFalse(ownership.isOwned)
     }
@@ -91,5 +136,8 @@ final class OCRDrainOwnershipTests: XCTestCase {
         var ownership = OCRDrainOwnership()
         XCTAssertNil(ownership.generationToCancel())
         XCTAssertFalse(ownership.isOwned)
+        guard case .idle = ownership.requestCancel() else {
+            return XCTFail("cancel before any start must be a no-op")
+        }
     }
 }
