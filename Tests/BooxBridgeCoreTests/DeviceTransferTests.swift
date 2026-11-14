@@ -205,4 +205,94 @@ import Testing
             try await service.createFolder(named: "a/b", in: root)
         }
     }
+
+    /// Regression test for the upload path on a REAL AdbClient: the earlier
+    /// dispatch layer threw for every nonzero exit, so upload's first stat
+    /// (existence check) aborted every normal NEW-filename upload on a real
+    /// device, where stat answers exit 1 + ENOENT for an absent file. The
+    /// scripted adb here models the device filesystem as a host directory
+    /// and speaks the exact argv shapes AdbCommandBuilder emits.
+    @Test func uploadPublishesNewFileThroughRealAdbClient() async throws {
+        try await withTempDirectoryAsync { dir in
+            let deviceRoot = dir.appendingPathComponent("device", isDirectory: true)
+            try FileManager.default.createDirectory(at: deviceRoot, withIntermediateDirectories: true)
+            let script = dir.appendingPathComponent("adb-emulator.sh")
+            let quotedRoot = "'" + deviceRoot.path + "'"
+            let body = """
+            #!/bin/sh
+            # Minimal adb emulator backed by a host directory (ROOT maps the
+            # device filesystem root). adb passes a shell command as ONE
+            # argument, so parse the command line. Supported shapes:
+            #   shell stat -c '%s|%Y|%F' -- 'PATH'
+            #   push LOCAL REMOTE
+            #   shell mv -n -- 'FROM' 'TO'
+            #   shell rm -f -- 'PATH'
+            #   shell sha256sum -- 'PATH'
+            ROOT=\(quotedRoot)
+            if [ "$1" = "-s" ]; then shift 2; fi
+            sub="$1"; shift
+            if [ "$sub" = "push" ]; then
+              mkdir -p "$ROOT$(dirname "$2")"
+              cp "$1" "$ROOT$2"
+              exit $?
+            fi
+            if [ "$sub" = "shell" ]; then
+              cmdline="$1"
+              case "$cmdline" in
+                stat*)
+                  path=$(printf '%s' "$cmdline" | sed -e "s/^.*-- '//" -e "s/'$//")
+                  f="$ROOT$path"
+                  if [ -e "$f" ]; then
+                    if [ -d "$f" ]; then kind="directory"; else kind="regular file"; fi
+                    printf '%s|1000|%s\\n' "$(wc -c < "$f" | tr -d ' ')" "$kind"
+                    exit 0
+                  fi
+                  printf "stat: '%s': No such file or directory\\n" "$path" >&2
+                  exit 1 ;;
+                mv*)
+                  from=$(printf '%s' "$cmdline" | sed -e "s/^mv -n -- '//" -e "s/'.*//")
+                  to=$(printf '%s' "$cmdline" | sed -e "s/^.* '//" -e "s/'$//")
+                  if [ -e "$ROOT$to" ]; then
+                    exit 0  # mv -n silently skips an existing destination
+                  fi
+                  mv "$ROOT$from" "$ROOT$to"
+                  exit $? ;;
+                rm*)
+                  path=$(printf '%s' "$cmdline" | sed -e "s/^rm -f -- '//" -e "s/'$//")
+                  rm -f "$ROOT$path"
+                  exit $? ;;
+                sha256sum*)
+                  path=$(printf '%s' "$cmdline" | sed -e "s/^sha256sum -- '//" -e "s/'$//")
+                  f="$ROOT$path"
+                  if [ -f "$f" ] && command -v sha256sum >/dev/null 2>&1; then
+                    printf '%s  %s\\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$path"
+                    exit 0
+                  fi
+                  printf "sha256sum: %s: No such file or directory\\n" "$path" >&2
+                  exit 1 ;;
+              esac
+            fi
+            echo "unhandled argv: $*" >&2
+            exit 64
+            """
+            try body.write(to: script, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+            let client = try AdbClient(executableURL: script)
+            let service = DeviceFileService(transport: client, serial: "78935a57", browseRoot: root)
+            let local = dir.appendingPathComponent("notes.txt")
+            let expected = Data("hello real device".utf8)
+            try expected.write(to: local)
+
+            try await service.upload(localFile: local, toDirectory: root, overwrite: false)
+
+            let publishedPath = deviceRoot.appendingPathComponent("sdcard/note/notes.txt").path
+            #expect(FileManager.default.fileExists(atPath: publishedPath))
+            #expect(try Data(contentsOf: URL(fileURLWithPath: publishedPath)) == expected)
+            // The upload temp must have been consumed by the publish move.
+            let publishedDir = deviceRoot.appendingPathComponent("sdcard/note").path
+            let leftovers = try FileManager.default.contentsOfDirectory(atPath: publishedDir)
+            #expect(leftovers == ["notes.txt"])
+        }
+    }
 }
