@@ -45,7 +45,7 @@ final class CredentialIsolationTests: XCTestCase {
         )
         let dbData = try Data(contentsOf: dir.appendingPathComponent("c.sqlite"))
         let wal = dir.appendingPathComponent("c.sqlite-wal")
-        let all = wal.fileExists()
+        let all = FileManager.default.fileExists(atPath: wal.path)
             ? dbData + (try Data(contentsOf: wal))
             : dbData
         let needle = Data(secret.utf8)

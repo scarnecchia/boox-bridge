@@ -49,7 +49,7 @@ final class AppSmokeAndHarnessTests: XCTestCase {
         let xml = String(data: entPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertFalse(xml.contains("disable-library-validation"), "blanket library validation exception must not be granted")
         let plist = Self.appBundleURL.appendingPathComponent("Contents/Info.plist")
-        let info = try NSDictionary(contentsOf: plist, errorIfMissing: true) as? [String: Any]
+        let info = try NSDictionary(contentsOf: plist) as? [String: Any]
         XCTAssertEqual(info?["CFBundleDisplayName"] as? String, "Boox Bridge")
         XCTAssertEqual(info?["CFBundleIdentifier"] as? String, "dev.booxbridge.app")
         XCTAssertEqual(info?["LSMinimumSystemVersion"] as? String, "26.1")
@@ -57,8 +57,10 @@ final class AppSmokeAndHarnessTests: XCTestCase {
 
 
     func test_accessibilityHarnessPrerequisiteCheck() throws {
-        let trusted = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
-            as CFDictionary) as Bool
+        // nil options means "check without prompting" — the same semantics as
+        // the explicit kAXTrustedCheckOptionPrompt: false, without touching the
+        // shared-mutable global Swift 6 forbids reading here.
+        let trusted = AXIsProcessTrustedWithOptions(nil) as Bool
         guard trusted else {
             throw XCTSkip("BLOCKED: this harness needs Accessibility permission for the test runner "
                         + "(System Settings → Privacy & Security → Accessibility). Not a pass.")

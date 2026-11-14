@@ -25,7 +25,7 @@ final class DocumentRenderingTests: XCTestCase {
 
     func test_documentRenderingFixtures() throws {
         var data = Data()
-        let url = try tempPDF(pages: [(300, 400, 0), (500, 200, 90), (200, 500, 270)], write: &data)
+        try tempPDF(pages: [(300, 400, 0), (500, 200, 90), (200, 500, 270)], write: &data)
         let storage = try withTempDir { dir in
             try ManagedStorage(rootURL: dir.appendingPathComponent("lib"))
         }

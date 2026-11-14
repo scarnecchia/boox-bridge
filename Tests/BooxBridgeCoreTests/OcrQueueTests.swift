@@ -187,7 +187,7 @@ struct FixedRenderer: PageRendering {
                                        modelID: "m", promptVersion: 1, at: Date())
 
             let samePath = try catalog.document(id: documentID)!.key.relativePath
-            try catalog.commitImport(
+            _ = try catalog.commitImport(
                 key: DocumentKey(serial: "s", rootID: "r", relativePath: samePath),
                 kind: .pdf, contentSHA256: UUID().uuidString, sizeBytes: 12, pageCount: 1,
                 remoteMtime: 2, remoteSize: 12, at: Date()
