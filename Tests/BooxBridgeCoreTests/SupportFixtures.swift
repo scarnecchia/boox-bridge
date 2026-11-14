@@ -1,0 +1,196 @@
+import Foundation
+@testable import BooxBridgeCore
+
+final class FakeDeviceTransport: DeviceTransport, @unchecked Sendable {
+    let executableURL = URL(fileURLWithPath: "/nonexistent/adb")
+
+    struct FakeFile {
+        var data: Data
+        var sizeBytes: Int64 { Int64(data.count) }
+        var mtime: Int64
+    }
+
+    private let lock = NSLock()
+    private var files: [String: FakeFile] = [:]
+    private var directories: Set<String> = []
+    private var statCounts: [String: Int] = [:]
+    private(set) var listCalls = 0
+    private(set) var pullCalls = 0
+
+    /// When true, the post-pull stat reports a different size — simulating a
+    /// file still being written by the device's export process.
+    var mutateOnPostStat = false
+    /// When true, remoteSHA256 returns a bogus hash — simulating corruption.
+    var corruptRemoteHash = false
+    /// When true, listFiles throws — simulating a disconnect mid-sync.
+    var failListing = false
+    /// When true, push throws — simulating a disconnect mid-upload.
+    var failPush = false
+    /// When set, this closure runs right before the post-publish stat,
+    /// letting tests create the destination concurrently (publish race).
+    var raceWriter: ((RemotePath) -> Void)?
+    /// When set, this closure runs at the start of pull, before any state
+    /// is read: the pull is then "in flight" and the test can create a
+    /// local destination mid-download (the mid-flight overwrite race).
+    var onPull: ((RemotePath) -> Void)?
+
+    private(set) var movedRemote: [(from: String, to: String)] = []
+    private(set) var removedRemote: [String] = []
+
+    func seed(_ path: RemotePath, data: Data, mtime: Int64 = 1_000) {
+        lock.lock(); defer { lock.unlock() }
+        files[path.raw] = FakeFile(data: data, mtime: mtime)
+    }
+
+    func removeAll() {
+        lock.lock(); defer { lock.unlock() }
+        files.removeAll()
+    }
+
+    func update(_ path: RemotePath, data: Data, mtime: Int64) {
+        lock.lock(); defer { lock.unlock() }
+        files[path.raw] = FakeFile(data: data, mtime: mtime)
+    }
+
+    func snapshotFiles() -> [String: FakeFile] {
+        lock.lock(); defer { lock.unlock() }
+        return files
+    }
+
+    private func file(_ path: String) -> FakeFile? {
+        lock.lock(); defer { lock.unlock() }
+        return files[path]
+    }
+
+    func listFiles(root: RemotePath, serial: String) throws -> [RemoteFileRecord] {
+        lock.lock(); defer { lock.unlock() }
+        listCalls += 1
+        if failListing { throw AdbClientError.commandFailed(command: "find", reason: "device disconnected") }
+        return files
+            .filter { $0.key.hasPrefix(root.raw + "/") }
+            .map { key, value in
+                RemoteFileRecord(
+                    path: try! RemotePath(key),
+                    sizeBytes: value.sizeBytes,
+                    modifiedEpochSeconds: value.mtime,
+                    isRegularFile: true
+                )
+            }
+            .sorted { $0.path.raw < $1.path.raw }
+    }
+
+    func stat(remote: RemotePath, serial: String) throws -> RemoteFileRecord? {
+        guard let f = file(remote.raw) else { return nil }
+        lock.lock()
+        statCounts[remote.raw, default: 0] += 1
+        let callNumber = statCounts[remote.raw]!
+        lock.unlock()
+        // Mutate only on EVEN stat calls for a path (the 2nd, 4th, …): the
+        // importer stats pre- and post-pull, so the "post" observation is
+        // the one that must differ when instability is being simulated.
+        let mutated = mutateOnPostStat && callNumber % 2 == 0
+        let size = mutated ? f.sizeBytes + 7 : f.sizeBytes
+        return RemoteFileRecord(path: remote, sizeBytes: size, modifiedEpochSeconds: f.mtime, isRegularFile: true)
+    }
+
+    func remoteSHA256(remote: RemotePath, serial: String) throws -> String? {
+        if corruptRemoteHash { return String(repeating: "0", count: 64) }
+        guard let f = file(remote.raw) else { return nil }
+        return SHA256Hasher().sha256Hex(of: f.data)
+    }
+
+    func pull(remote: RemotePath, intoStagingDirectory: URL, serial: String) throws -> URL {
+        // Test hook runs BEFORE taking the lock (same pattern as
+        // raceWriter): it models a competitor acting while the copy is in
+        // flight, and seeding/writing inside it must not self-deadlock.
+        onPull?(remote)
+        lock.lock(); defer { lock.unlock() }
+        pullCalls += 1
+        guard let f = files[remote.raw] else {
+            throw AdbClientError.commandFailed(command: "pull", reason: "no such file")
+        }
+        let destination = intoStagingDirectory.appendingPathComponent(remote.lastComponent)
+        try f.data.write(to: destination)
+        return destination
+    }
+
+    func push(localFile: URL, toRemote: RemotePath, serial: String) throws {
+        if failPush {
+            throw AdbClientError.commandFailed(command: "push", reason: "device disconnected")
+        }
+        let data = try Data(contentsOf: localFile)
+        lock.lock(); defer { lock.unlock() }
+        files[toRemote.raw] = FakeFile(data: data, mtime: 9_999)
+    }
+
+    func makeDirectory(remote: RemotePath, serial: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        directories.insert(remote.raw)
+    }
+
+    func moveRemoteNoClobber(from: RemotePath, to: RemotePath, serial: String) throws {
+        // Test hook runs BEFORE taking the lock: it seeds the destination,
+        // and seeding takes the same (non-recursive) lock.
+        raceWriter?(to)
+        lock.lock(); defer { lock.unlock() }
+        movedRemote.append((from.raw, to.raw))
+        guard files[from.raw] != nil || directories.contains(from.raw) else {
+            throw AdbClientError.commandFailed(command: "mv", reason: "source missing")
+        }
+        // mv -n: never overwrite an existing destination.
+        guard files[to.raw] == nil && !directories.contains(to.raw) else { return }
+        if let file = files.removeValue(forKey: from.raw) {
+            files[to.raw] = file
+        } else if directories.remove(from.raw) != nil {
+            directories.insert(to.raw)
+        }
+    }
+
+    func removeRemote(path: RemotePath, serial: String) throws {
+        guard RemoteTempName.isAppOwnedTemp(path.lastComponent) else {
+            throw AdbClientError.commandFailed(command: "rm", reason: "refusing non-temp name")
+        }
+        lock.lock(); defer { lock.unlock() }
+        removedRemote.append(path.raw)
+        files.removeValue(forKey: path.raw)
+    }
+
+    func listEntries(root: RemotePath, serial: String) throws -> [RemoteFileRecord] {
+        lock.lock(); defer { lock.unlock() }
+        listCalls += 1
+        if failListing { throw AdbClientError.commandFailed(command: "find", reason: "device disconnected") }
+        var records = files
+            .filter { $0.key.hasPrefix(root.raw + "/") }
+            .map { key, value in
+                RemoteFileRecord(path: try! RemotePath(key), sizeBytes: value.sizeBytes,
+                                 modifiedEpochSeconds: value.mtime, isRegularFile: true)
+            }
+        for directory in directories where directory.hasPrefix(root.raw + "/") {
+            records.append(RemoteFileRecord(path: try! RemotePath(directory), sizeBytes: 0,
+                                            modifiedEpochSeconds: 0, isRegularFile: false))
+        }
+        return records.sorted { $0.path.raw < $1.path.raw }
+    }
+
+    func listDevices() throws -> [DeviceEntry] { [] }
+    func deviceProperties(serial: String, names: [String]) throws -> [String: String] { [:] }
+    func version() throws -> String { "fake 1.0" }
+}
+
+@discardableResult
+func withTempDirectory<T>(_ body: (URL) throws -> T) rethrows -> T {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("boox-tests-\(UUID().uuidString)", isDirectory: true)
+    try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: url) }
+    return try body(url)
+}
+
+@discardableResult
+func withTempDirectoryAsync<T>(_ body: (URL) async throws -> T) async throws -> T {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("boox-tests-\(UUID().uuidString)", isDirectory: true)
+    try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: url) }
+    return try await body(url)
+}

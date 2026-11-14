@@ -1,0 +1,231 @@
+// pattern: Imperative Shell
+
+import Foundation
+
+#if canImport(Glibc)
+import Glibc
+#else
+import Darwin
+#endif
+
+public enum DeviceFileError: Error, Equatable, Sendable, CustomStringConvertible {
+    case outsideBrowseRoot(path: String, root: String)
+    case destinationExistsNeedsConfirmation(path: String)
+    case publishRace(path: String)
+    case uploadVerificationFailed(path: String, detail: String)
+    case invalidName(String)
+
+    public var description: String {
+        switch self {
+        case .outsideBrowseRoot(let p, let r): return "path \(p) is outside the selected folder \(r)"
+        case .destinationExistsNeedsConfirmation(let p): return "\(p) already exists on the device. Remote replacement is disabled in this release — move or remove the existing file on the device, then upload again"
+        case .publishRace(let p): return "destination \(p) appeared during upload; nothing was overwritten"
+        case .uploadVerificationFailed(let p, let d): return "uploaded file \(p) failed verification: \(d)"
+        case .invalidName(let n): return "'\(n)' is not a valid name"
+        }
+    }
+}
+
+public struct RemoteEntry: Equatable, Sendable, Identifiable {
+    public let path: RemotePath
+    public let sizeBytes: Int64
+    public let modifiedEpochSeconds: Int64
+    public let isDirectory: Bool
+
+    public var id: String { path.raw }
+    public var name: String { path.lastComponent }
+}
+
+public actor DeviceFileService {
+    private let transport: DeviceTransport
+    private let hasher: ContentHashing
+    public let browseRoot: RemotePath
+    public let serial: String
+
+    public init(transport: DeviceTransport, serial: String, browseRoot: RemotePath,
+                hasher: ContentHashing = SHA256Hasher()) {
+        self.transport = transport
+        self.hasher = hasher
+        self.serial = serial
+        self.browseRoot = browseRoot
+    }
+
+    /// Direct children of `directory` (validated inside the browse root),
+    /// directories first, then files, both alphabetical.
+    public func entries(in directory: RemotePath) async throws -> [RemoteEntry] {
+        try requireInRoot(directory)
+        let all = try await transport.listEntries(root: directory, serial: serial)
+        let depth = directory.components.count
+        return all
+            .filter { $0.path.components.count == depth + 1 }
+            .map { RemoteEntry(
+                path: $0.path,
+                sizeBytes: $0.sizeBytes,
+                modifiedEpochSeconds: $0.modifiedEpochSeconds,
+                isDirectory: !$0.isRegularFile
+            ) }
+            .sorted {
+                if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+    }
+
+    /// Download remote files into a local directory the user chose. Each
+    /// file lands under a unique staging name first, then moves into place;
+    /// an existing local file is only replaced with explicit consent — and
+    /// the consent decision is re-checked AFTER the pull completes, because
+    /// the destination can appear while the copy is in flight.
+    public func download(
+        files: [RemotePath],
+        intoLocalDirectory directory: URL,
+        overwrite: Bool
+    ) async throws -> [URL] {
+        for file in files { try requireInRoot(file) }
+        var written: [URL] = []
+        let fm = FileManager.default
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        for file in files {
+            let destination = directory.appendingPathComponent(file.lastComponent)
+            if fm.fileExists(atPath: destination.path) && !overwrite {
+                throw DeviceFileError.destinationExistsNeedsConfirmation(path: destination.lastPathComponent)
+            }
+            let staging = directory.appendingPathComponent(".booxbridge-download-\(UUID().uuidString)")
+            try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+            do {
+                let staged = try await transport.pull(remote: file, intoStagingDirectory: staging, serial: serial)
+                // The pull awaited above can take a long time; another
+                // process (or a reentrant download) may have created the
+                // destination meanwhile, so the pre-pull consent check is
+                // stale. Publishing here used to removeItem (recursively!)
+                // whatever had appeared, destroying bytes the consent
+                // decision never saw.
+                if fm.fileExists(atPath: destination.path) {
+                    guard overwrite else {
+                        // No-clobber: never touch bytes we never saw.
+                        throw DeviceFileError.destinationExistsNeedsConfirmation(path: destination.lastPathComponent)
+                    }
+                    try replaceAtomically(at: destination, with: staged)
+                } else {
+                    try fm.moveItem(at: staged, to: destination)
+                }
+                try? fm.removeItem(at: staging)
+                written.append(destination)
+            } catch {
+                try? fm.removeItem(at: staging)
+                throw error
+            }
+        }
+        return written
+    }
+
+    /// Swap `source` in over `destination` in one atomic step: if the
+    /// replacement fails for any reason, the previous bytes stay intact.
+    /// Direct rename(2) provides that guarantee; remove-then-move would
+    /// leave a window where the destination is missing — and any failure
+    /// after the remove destroys the original.
+    private func replaceAtomically(at destination: URL, with source: URL) throws {
+        if rename(source.path, destination.path) != 0 {
+            // errno after a failed call is always a defined POSIX value;
+            // the failable initializer only needs a defensive fallback.
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    /// Upload a local file into a remote folder inside the browse root.
+    /// Publishes from an app-owned temporary sibling via `mv -n`, so a
+    /// concurrent writer can never be overwritten — if the destination
+    /// appeared, the upload aborts and the temp is cleaned up.
+    public func upload(
+        localFile: URL,
+        toDirectory directory: RemotePath,
+        overwrite: Bool
+    ) async throws {
+        try requireInRoot(directory)
+        let fileName = localFile.lastPathComponent
+        guard !fileName.isEmpty, fileName != ".", fileName != "..", !fileName.contains("\0") else {
+            throw DeviceFileError.invalidName(fileName)
+        }
+        let destination = try directory.appending(fileName)
+        try requireInRoot(destination)
+
+        if let existing = try await transport.stat(remote: destination, serial: serial) {
+            // Remote overwrite is DISABLED in this release: no tested adb
+            // capability guarantees safe replacement (a remove+rename window
+            // can destroy the existing file if anything fails mid-way).
+            // The error tells the user to remove/rename on the device first.
+            _ = existing
+            throw DeviceFileError.destinationExistsNeedsConfirmation(path: destination.raw)
+        }
+
+        let tempPath = try directory.appending(RemoteTempName.tempName(for: fileName))
+        do {
+            try await transport.push(localFile: localFile, toRemote: tempPath, serial: serial)
+
+            // Verify the staged bytes: the device must report the same size
+            // we just pushed.
+            guard let staged = try await transport.stat(remote: tempPath, serial: serial),
+                  staged.isRegularFile else {
+                throw DeviceFileError.uploadVerificationFailed(path: tempPath.raw, detail: "staged file missing after push")
+            }
+            let localSize = (try FileManager.default.attributesOfItem(atPath: localFile.path)[.size] as? NSNumber)?.int64Value ?? -1
+            guard staged.sizeBytes == localSize else {
+                throw DeviceFileError.uploadVerificationFailed(
+                    path: tempPath.raw,
+                    detail: "size mismatch (device \(staged.sizeBytes), local \(localSize))"
+                )
+            }
+            let localSHA256 = try hasher.sha256Hex(fileAt: localFile)
+
+            if let existing = try await transport.stat(remote: destination, serial: serial), existing.isRegularFile {
+                throw DeviceFileError.publishRace(path: destination.raw)
+            }
+            try await transport.moveRemoteNoClobber(from: tempPath, to: destination, serial: serial)
+
+            // `mv -n` exits 0 WITHOUT moving when a competitor won the
+            // publication slot — publish means our temp was consumed. The
+            // temp's absence is the direct evidence; a destination size
+            // comparison alone would read a same-size competitor as
+            // success, reporting wrong bytes plus a leaked app-owned temp.
+            let tempConsumed = try await transport.stat(remote: tempPath, serial: serial) == nil
+            guard tempConsumed else {
+                throw DeviceFileError.publishRace(path: destination.raw)
+            }
+            guard let final = try await transport.stat(remote: destination, serial: serial),
+                  final.isRegularFile, final.sizeBytes == localSize else {
+                // Our publish lost a race or was clobbered: nothing
+                // overwritten by us; the catch path cleans our temp.
+                throw DeviceFileError.publishRace(path: destination.raw)
+            }
+            // Content identity when the device can hash: equal sizes cannot
+            // tell our bytes from a same-size competitor's.
+            if let remoteHash = try await transport.remoteSHA256(remote: destination, serial: serial) {
+                guard remoteHash == localSHA256 else {
+                    throw DeviceFileError.publishRace(path: destination.raw)
+                }
+            }
+        } catch {
+            // Cancel/disconnect mid-upload: originals preserved; the temp is
+            // app-owned, so cleanup is safe and best-effort.
+            try? await transport.removeRemote(path: tempPath, serial: serial)
+            throw error
+        }
+    }
+
+    /// Create a folder inside the browse root (explicit user action).
+    public func createFolder(named name: String, in directory: RemotePath) async throws {
+        try requireInRoot(directory)
+        guard !name.isEmpty, !name.contains("/"), name != ".", name != "..", !name.contains("\0") else {
+            throw DeviceFileError.invalidName(name)
+        }
+        let target = try directory.appending(name)
+        try requireInRoot(target)
+        try await transport.makeDirectory(remote: target, serial: serial)
+    }
+
+    private func requireInRoot(_ path: RemotePath) throws {
+        guard path.isWithin(browseRoot) else {
+            throw DeviceFileError.outsideBrowseRoot(path: path.raw, root: browseRoot.raw)
+        }
+    }
+}

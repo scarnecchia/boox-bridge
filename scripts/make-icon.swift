@@ -2,12 +2,11 @@
 //
 // make-icon.swift — render the app icon at every macOS size.
 //
-// Draws a simple "document" glyph (a few text lines over a small table grid)
-// on a rounded-rect tile with a soft gradient. Pure CoreGraphics, no assets,
-// no dependencies — runs under plain `swift`. The Makefile runs
-// `iconutil -c icns build/AppIcon.iconset` on the PNGs this writes.
-//
-// Replace the `drawGlyph` body with your own mark when you fork the template.
+// Draws the Boox Bridge mark: a handwritten notebook page with a USB-C
+// plug at its corner, on a rounded-rect tile with a soft gradient. Pure
+// CoreGraphics, no assets, no dependencies — runs under plain `swift`.
+// The Makefile runs `iconutil -c icns build/AppIcon.iconset` on the PNGs
+// this writes.
 
 import AppKit
 
@@ -54,58 +53,62 @@ func draw(into ctx: CGContext, size s: CGFloat) {
 }
 
 func drawGlyph(into ctx: CGContext, tile: CGRect) {
-    // A white "page" centered in the tile.
-    let pageW = tile.width * 0.52
-    let pageH = pageW * 1.28
-    let page = CGRect(
-        x: tile.midX - pageW / 2,
-        y: tile.midY - pageH / 2,
-        width: pageW, height: pageH)
+    // A white notebook page, slightly rotated, with handwritten-style lines.
+    let pageW = tile.width * 0.54
+    let pageH = pageW * 1.24
+    ctx.saveGState()
+    ctx.translateBy(x: tile.midX, y: tile.midY)
+    ctx.rotate(by: -0.06)
+    let page = CGRect(x: -pageW / 2, y: -pageH / 2, width: pageW, height: pageH)
     let radius = pageW * 0.08
-    ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.96))
+    ctx.setShadow(offset: CGSize(width: 0, height: -pageH * 0.03), blur: pageW * 0.10,
+                  color: CGColor(red: 0, green: 0, blue: 0.15, alpha: 0.35))
+    ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.97))
     ctx.addPath(CGPath(roundedRect: page, cornerWidth: radius, cornerHeight: radius, transform: nil))
     ctx.fillPath()
+    ctx.restoreGState()
 
+    // Handwriting lines: an accent heading plus muted strokes, drawn in the
+    // page's (rotated) coordinate space so they sit on the page naturally.
+    ctx.saveGState()
+    ctx.translateBy(x: tile.midX, y: tile.midY)
+    ctx.rotate(by: -0.06)
     let accent = CGColor(red: 0.20, green: 0.34, blue: 0.85, alpha: 1)
-    let muted = CGColor(red: 0.62, green: 0.68, blue: 0.82, alpha: 1)
-    let padX = page.width * 0.16
-    let lineH = page.height * 0.045
-    let lineGap = page.height * 0.075
-
-    // Three "text lines" at the top — the first (a heading) is accent-tinted
-    // and wider; the next two are muted body lines.
-    var y = page.maxY - page.height * 0.16
+    let muted = CGColor(red: 0.55, green: 0.60, blue: 0.72, alpha: 1)
+    let padX = pageW * 0.14
+    let lineH = pageH * 0.035
+    let lineGap = pageH * 0.075
+    var y = pageH / 2 - pageH * 0.14
     let lineSpecs: [(CGColor, CGFloat)] = [
-        (accent, 0.68), (muted, 0.56), (muted, 0.44),
+        (accent, 0.70), (muted, 0.58), (muted, 0.48), (muted, 0.62),
     ]
     for (color, widthFraction) in lineSpecs {
         let bar = CGRect(
-            x: page.minX + padX, y: y - lineH,
-            width: (page.width - 2 * padX) * widthFraction, height: lineH)
+            x: -pageW / 2 + padX, y: y - lineH,
+            width: (pageW - 2 * padX) * widthFraction, height: lineH)
         ctx.setFillColor(color)
         ctx.addPath(CGPath(roundedRect: bar, cornerWidth: lineH / 2, cornerHeight: lineH / 2, transform: nil))
         ctx.fillPath()
         y -= lineGap
     }
+    ctx.restoreGState()
 
-    // A small 2×3 "table" grid in the lower half — the data table.
-    let gridTop = y - page.height * 0.04
-    let gridRect = CGRect(
-        x: page.minX + padX, y: page.minY + page.height * 0.14,
-        width: page.width - 2 * padX, height: gridTop - (page.minY + page.height * 0.14))
-    ctx.setStrokeColor(muted)
-    ctx.setLineWidth(max(1, page.width * 0.012))
-    ctx.addRect(gridRect)
-    // Two interior verticals, one interior horizontal.
-    for i in 1...2 {
-        let x = gridRect.minX + gridRect.width * CGFloat(i) / 3
-        ctx.move(to: CGPoint(x: x, y: gridRect.minY))
-        ctx.addLine(to: CGPoint(x: x, y: gridRect.maxY))
-    }
-    let midY = gridRect.minY + gridRect.height / 2
-    ctx.move(to: CGPoint(x: gridRect.minX, y: midY))
-    ctx.addLine(to: CGPoint(x: gridRect.maxX, y: midY))
-    ctx.strokePath()
+    // USB-C plug bottom-right: rounded capsule body + tongue, in white on
+    // a small accent chip so it reads at 16px.
+    let plugW = tile.width * 0.34
+    let plugH = plugW * 0.42
+    let plugRect = CGRect(
+        x: tile.maxX - plugW * 0.78, y: tile.minY + tile.height * 0.10,
+        width: plugW, height: plugH)
+    ctx.setFillColor(accent)
+    ctx.addPath(CGPath(roundedRect: plugRect, cornerWidth: plugH * 0.45, cornerHeight: plugH * 0.45, transform: nil))
+    ctx.fillPath()
+    let slot = CGRect(
+        x: plugRect.midX - plugW * 0.16, y: plugRect.midY - plugH * 0.16,
+        width: plugW * 0.32, height: plugH * 0.32)
+    ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.95))
+    ctx.addPath(CGPath(roundedRect: slot, cornerWidth: slot.height / 2, cornerHeight: slot.height / 2, transform: nil))
+    ctx.fillPath()
 }
 
 for (name, px) in variants {

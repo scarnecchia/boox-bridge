@@ -1,0 +1,176 @@
+// pattern: Functional Core
+
+import Foundation
+
+/// Every remote operation the app performs. Sync/import uses the read-only
+/// cases only. `moveRemoteNoClobber` and `removeRemote` are REMOTE
+/// MUTATIONS: they exist solely for the explicit upload publish path and
+/// app-owned temporary cleanup in DeviceFileService, never for import
+/// (remoteMutationPolicy enforces this).
+public enum AdbCommand: Equatable, Sendable {
+    case version
+    case devices
+    case stat(remote: RemotePath, serial: String)
+    case sha256(remote: RemotePath, serial: String)
+    case listFiles(root: RemotePath, serial: String)
+    case listEntries(root: RemotePath, serial: String)
+    case pull(remote: RemotePath, intoLocalDirectory: String, serial: String)
+    case push(localPath: String, toRemote: RemotePath, serial: String)
+    case makeDirectory(remote: RemotePath, serial: String)
+    case deviceProperty(name: String, serial: String)
+    /// `mv -n`: move without overwriting an existing destination.
+    case moveRemoteNoClobber(from: RemotePath, to: RemotePath, serial: String)
+    /// Remove a remote file (app-owned temporary names only).
+    case removeRemote(path: RemotePath, serial: String)
+}
+
+/// Marker prefix for app-owned remote temporary upload names. Cleanup is
+/// only ever issued for names the app created with this prefix.
+public enum RemoteTempName {
+    public static let prefix = ".booxbridge-upload-"
+
+    public static func tempName(for fileName: String) -> String {
+        "\(prefix)\(UUID().uuidString)-\(fileName)"
+    }
+
+    public static func isAppOwnedTemp(_ name: String) -> Bool {
+        name.hasPrefix(prefix)
+    }
+}
+
+public enum AdbCommandBuilder {
+    /// Build the local argv (never a shell string) for a command.
+    public static func argv(for command: AdbCommand) -> [String] {
+        switch command {
+        case .version:
+            return ["version"]
+        case .devices:
+            return ["devices", "-l"]
+        case .stat(let remote, let serial):
+            return scoped(serial, ["shell", "stat -c '%s|%Y|%F' -- " + ShellQuoting.quote(remote)])
+        case .sha256(let remote, let serial):
+            return scoped(serial, ["shell", "sha256sum -- " + ShellQuoting.quote(remote)])
+        case .listFiles(let root, let serial):
+            return scoped(serial, ["shell", listingScript(for: root)])
+        case .listEntries(let root, let serial):
+            return scoped(serial, ["shell", listingScript(for: root, filesOnly: false)])
+        case .pull(let remote, let localDirectory, let serial):
+            return scoped(serial, ["pull", remote.raw, localDirectory])
+        case .push(let localPath, let remote, let serial):
+            return scoped(serial, ["push", localPath, remote.raw])
+        case .makeDirectory(let remote, let serial):
+            return scoped(serial, ["shell", "mkdir -p -- " + ShellQuoting.quote(remote)])
+        case .deviceProperty(let name, let serial):
+            return scoped(serial, ["shell", "getprop " + ShellQuoting.quote(name)])
+        case .moveRemoteNoClobber(let from, let to, let serial):
+            return scoped(serial, ["shell", "mv -n -- " + ShellQuoting.quote(from) + " " + ShellQuoting.quote(to)])
+        case .removeRemote(let path, let serial):
+            return scoped(serial, ["shell", "rm -f -- " + ShellQuoting.quote(path)])
+        }
+    }
+
+    /// NUL-delimited listing: for each entry under `root`, emit
+    /// "size|mtime|kind<TAB>path" followed by a NUL byte. Metadata sits
+    /// before the tab so the path may legally contain tabs, spaces,
+    /// newlines, quotes, and leading hyphens.
+    ///
+    /// `find -exec … {} +` passes a BATCH of files as positional parameters
+    /// to one sh -c invocation, so the inner script must iterate ALL of
+    /// them (`for f do … done`) — handling only "$1" silently drops every
+    /// file after the first in each batch. The inner script uses only
+    /// double quotes, so it can be safely single-quoted by ShellQuoting
+    /// inside the outer script. Verified end-to-end by
+    /// listingScriptEndToEndAgainstRealShell.
+    static func listingScript(for root: RemotePath, filesOnly: Bool = true) -> String {
+        let inner = "for f do printf \"%s\\t\" \"$(stat -c '%s|%Y|%F' -- \"$f\")\"; printf \"%s\\0\" \"$f\"; done"
+            .replacingOccurrences(of: "'", with: "'\\''")
+        let typeFilter = filesOnly ? " -type f" : ""
+        return "find \(ShellQuoting.quote(root))\(typeFilter) -exec sh -c '"
+            + inner
+            + "' sh {} +"
+    }
+
+    static func scoped(_ serial: String, _ rest: [String]) -> [String] {
+        ["-s", serial] + rest
+    }
+}
+
+/// One file record from the NUL-delimited listing.
+public struct RemoteFileRecord: Equatable, Sendable {
+    public let path: RemotePath
+    public let sizeBytes: Int64
+    public let modifiedEpochSeconds: Int64
+    public let isRegularFile: Bool
+
+    public init(path: RemotePath, sizeBytes: Int64, modifiedEpochSeconds: Int64, isRegularFile: Bool) {
+        self.path = path
+        self.sizeBytes = sizeBytes
+        self.modifiedEpochSeconds = modifiedEpochSeconds
+        self.isRegularFile = isRegularFile
+    }
+}
+
+public enum RemoteListingParser {
+    public enum ParseError: Error, Equatable, Sendable, CustomStringConvertible {
+        case malformedRecord(String)
+        case pathOutsideRoot(root: String, path: String)
+        case truncatedListing
+
+        public var description: String {
+            switch self {
+            case .malformedRecord(let r): return "malformed remote listing record: \(r)"
+            case .pathOutsideRoot(let root, let path): return "listed path \(path) is outside root \(root)"
+            case .truncatedListing: return "remote listing ended without a final NUL terminator"
+            }
+        }
+    }
+
+    /// Parse the NUL-delimited output of listFiles/listEntries. Records are
+    /// strict: any malformed or out-of-root record fails the whole listing
+    /// rather than being dropped — a partial listing must never be treated
+    /// as authoritative (that would fabricate remote deletions).
+    public static func parse(_ data: Data, root: RemotePath) throws -> [RemoteFileRecord] {
+        try parse(data, root: root, includingDirectories: false)
+    }
+
+    public static func parse(_ data: Data, root: RemotePath, includingDirectories: Bool) throws -> [RemoteFileRecord] {
+        var records: [RemoteFileRecord] = []
+        var start = data.startIndex
+
+        while start < data.endIndex {
+            guard let nul = data[start...].firstIndex(of: 0) else {
+                throw ParseError.truncatedListing
+            }
+            let record = data[start..<nul]
+            start = data.index(after: nul)
+            guard let line = String(data: record, encoding: .utf8) else {
+                throw ParseError.malformedRecord("<non-utf8 record>")
+            }
+            guard let tab = line.firstIndex(of: "\t") else {
+                throw ParseError.malformedRecord(line)
+            }
+            let meta = String(line[..<tab])
+            let pathPart = String(line[line.index(after: tab)...])
+            let fields = meta.split(separator: "|", omittingEmptySubsequences: false)
+            guard fields.count == 3,
+                  let size = Int64(fields[0]),
+                  let mtime = Int64(fields[1]) else {
+                throw ParseError.malformedRecord(line)
+            }
+            let kind = String(fields[2])
+            guard let path = try? RemotePath(pathPart) else {
+                throw ParseError.malformedRecord(line)
+            }
+            guard path.isWithin(root) else {
+                throw ParseError.pathOutsideRoot(root: root.raw, path: path.raw)
+            }
+            records.append(RemoteFileRecord(
+                path: path,
+                sizeBytes: size,
+                modifiedEpochSeconds: mtime,
+                isRegularFile: kind.contains("regular file")
+            ))
+        }
+        return includingDirectories ? records : records.filter(\.isRegularFile)
+    }
+}

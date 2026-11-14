@@ -58,11 +58,12 @@ FILES="$(grep -rIl -e "$OLD_NAME" -e "$OLD_BUNDLE" . \
 	--exclude="rename.sh" || true)"
 
 for f in $FILES; do
-	# macOS/BSD sed in-place needs the empty backup-suffix argument.
-	sed -i '' \
+	# A nonempty backup suffix works with both GNU and BSD sed.
+	sed -i.bak \
 		-e "s/$OLD_BUNDLE/$NEW_BUNDLE/g" \
 		-e "s/$OLD_NAME/$NEW_NAME/g" \
 		"$f"
+	rm -f "$f.bak"
 done
 
 echo "✓ renamed. Next:"

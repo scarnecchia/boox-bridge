@@ -1,0 +1,363 @@
+// pattern: Imperative Shell
+// Secrets never appear in errors, logs, or the catalog.
+
+import Foundation
+
+public enum OcrOutcome: Equatable, Sendable {
+    case succeeded(text: String)
+    /// retryable marks transient failures (network, 429/5xx) that the drain
+    /// loop may requeue with its own escalating backoff; permanent failures
+    /// are terminal.
+    case failed(jobID: Int64, reason: String, retryable: Bool)
+    /// The provider itself directed a wait (a parsed Retry-After header).
+    /// The drain loop must sleep this delay instead of its local backoff —
+    /// still bounded by the configured cap. Keeping it a separate case is
+    /// what lets the delay survive from the response headers to the drain.
+    case retryAfter(jobID: Int64, reason: String, delay: TimeInterval)
+    case staleDiscarded(revisionID: Int64)
+}
+
+public enum OcrRunError: Error, Equatable, Sendable, CustomStringConvertible {
+    case staleResult(revisionID: Int64)
+    case keyMissing(profileID: String)
+    case endpointRejected(reason: String)
+    case retryable(delay: TimeInterval, reason: String)
+    /// The provider dictated the wait (Retry-After header), distinct from
+    /// our own backoff so the drain can honor the directive verbatim.
+    case providerRetry(delay: TimeInterval, reason: String)
+    case permanent(reason: String)
+    case cancelled
+
+    public var description: String {
+        switch self {
+        case .staleResult(let r): return "result arrived for revision \(r), which is no longer current; discarded"
+        case .keyMissing(let p): return CredentialError.missingKey(profileID: p).description
+        case .endpointRejected(let r): return r
+        case .retryable(let d, let r): return "transient failure (\(r)); retry in \(Int(d))s"
+        case .providerRetry(let d, let r): return "transient failure (\(r)); provider requested a retry in \(Int(d))s"
+        case .permanent(let r): return r
+        case .cancelled: return "OCR cancelled"
+        }
+    }
+}
+
+public struct OcrRunnerLimits: Sendable {
+    public var retry = RetryLimits()
+    public var maxImageDimensionPoints: CGFloat = 2000
+
+    public init() {}
+}
+
+/// One drain-time resolution of a provider profile: the profile snapshot AND
+/// its API key, read at the same instant. Endpoint and key always travel as
+/// a coherent pair — a rotation saved while a drain is live can never
+/// combine the old endpoint with the new key (or vice versa); it takes
+/// effect on the NEXT drain, when the caller captures fresh pairs.
+public struct DrainCredential: Equatable, Sendable {
+    public let profile: ProviderProfile
+    public let apiKey: String
+
+    public init(profile: ProviderProfile, apiKey: String) {
+        self.profile = profile
+        self.apiKey = apiKey
+    }
+}
+
+public actor OcrRunner {
+    private let catalog: CatalogStore
+    private let transport: HTTPTransporting
+    private let renderer: PageRendering
+    private let clock: WallClock
+    private let limits: OcrRunnerLimits
+
+    public init(
+        catalog: CatalogStore,
+        transport: HTTPTransporting,
+        renderer: PageRendering,
+        clock: WallClock = SystemClock(),
+        limits: OcrRunnerLimits = OcrRunnerLimits()
+    ) {
+        self.catalog = catalog
+        self.transport = transport
+        self.renderer = renderer
+        self.clock = clock
+        self.limits = limits
+    }
+
+    /// Execute one job end-to-end. The caller (drain/manual retry) owns
+    /// state transitions; this method is the network+decode+commit core.
+    public func execute(
+        job: OcrJob,
+        profile: ProviderProfile,
+        apiKey: String,
+        prompt: String = PromptVersion.text
+    ) async -> OcrOutcome {
+        do {
+            try checkRevisionFresh(job: job)
+
+            guard !apiKey.isEmpty else {
+                throw OcrRunError.keyMissing(profileID: profile.id)
+            }
+
+            guard let revisionHash = try catalog.revisionContentSHA256(revisionID: job.revisionID) else {
+                throw OcrRunError.staleResult(revisionID: job.revisionID)
+            }
+            let imageData = try renderer.pngData(
+                revisionSHA256: revisionHash,
+                pageIndex: job.pageIndex,
+                maxDimensionPoints: limits.maxImageDimensionPoints
+            )
+
+            let request = try ProviderWire.makeRequest(
+                profile: profile, apiKey: apiKey, prompt: prompt,
+                imagePNGData: imageData
+            )
+
+            let response = try await send(request)
+            let text = try ProviderWire.decodeTranscription(kind: profile.kind, body: response.body)
+
+            // Late-response guard: commit only if this revision is still
+            // the document's current revision.
+            try checkRevisionFresh(job: job)
+            try catalog.recordTranscription(
+                revisionID: job.revisionID, pageIndex: job.pageIndex, rawText: text, at: clock.now()
+            )
+            try catalog.updateJob(
+                id: job.id, state: .succeeded, attempts: job.attempts + 1,
+                lastError: nil, at: clock.now()
+            )
+            return .succeeded(text: text)
+        } catch let error as OcrRunError {
+            if case .staleResult = error {
+                try? catalog.updateJob(
+                    id: job.id, state: .failed, attempts: job.attempts + 1,
+                    lastError: error.description, at: clock.now()
+                )
+                return .staleDiscarded(revisionID: job.revisionID)
+            }
+            if case .retryable = error {
+                return .failed(jobID: job.id, reason: error.description, retryable: true)
+            }
+            if case .providerRetry(let delay, _) = error {
+                // The delay travels in the outcome: execute() is the only
+                // place that sees the response headers, and the drain loop
+                // is the only place that decides when to requeue.
+                return .retryAfter(jobID: job.id, reason: error.description, delay: delay)
+            }
+            return .failed(jobID: job.id, reason: error.description, retryable: false)
+        } catch {
+            return .failed(jobID: job.id, reason: String(describing: error), retryable: false)
+        }
+    }
+
+    /// Drain the durable queue at concurrency 1. Cancelling the enclosing
+    /// task stops scheduling new pages and aborts in-flight work where the
+    /// transport allows; a request already sent may still have been billed,
+    /// which the UI must disclose.
+    ///
+    /// Consent fidelity: the job row persists the exact (profile, model,
+    /// prompt-version) tuple the user approved at enqueue time. The MODEL and
+    /// PROMPT must come from the job, not from whatever the profile currently
+    /// points at; otherwise a paused queue resumed after a provider-settings
+    /// edit would transcribe pages under settings the user never approved
+    /// while history still names the old model.
+    ///
+    /// Credential coherence: the resolver supplies endpoint and key as ONE
+    /// DrainCredential per profile, captured at drain start by the caller.
+    /// The runner holds no credential store at all — it cannot fetch secrets
+    /// mid-drain — so a rotation saved while the drain is live can never
+    /// pair the old endpoint with the new key; the new pairing takes effect
+    /// on the next drain.
+    public func drain(
+        profileResolver: @Sendable (_ profileID: String) -> DrainCredential?
+    ) async {
+        while let job = try? catalog.nextQueuedJob() {
+            if Task.isCancelled { break }
+            guard let credential = profileResolver(job.profileID) else {
+                try? catalog.updateJob(
+                    id: job.id, state: .failed, attempts: job.attempts + 1,
+                    lastError: "profile \(job.profileID) has no usable endpoint/API key pairing at drain start — check Settings → Providers and re-enqueue the page", at: clock.now()
+                )
+                continue
+            }
+            guard !job.modelID.isEmpty else {
+                try? catalog.updateJob(
+                    id: job.id, state: .failed, attempts: job.attempts + 1,
+                    lastError: "queued job has no model recorded — re-enqueue the page", at: clock.now()
+                )
+                continue
+            }
+            guard let prompt = Self.prompt(for: job) else {
+                try? catalog.updateJob(
+                    id: job.id, state: .failed, attempts: job.attempts + 1,
+                    lastError: "queued prompt version \(job.promptVersion) is not supported by this build — re-enqueue the page", at: clock.now()
+                )
+                continue
+            }
+            // The job's stored model wins over the profile's current one;
+            // endpoint and key come from the drain-time pair as a unit.
+            var effectiveProfile = credential.profile
+            effectiveProfile.modelID = job.modelID
+            try? catalog.updateJob(
+                id: job.id, state: .running, attempts: job.attempts, lastError: nil, at: clock.now()
+            )
+            let outcome = await execute(job: job, profile: effectiveProfile,
+                                        apiKey: credential.apiKey, prompt: prompt)
+            switch outcome {
+            case .succeeded:
+                continue
+            case .staleDiscarded:
+                continue
+            case .failed(let jobID, let reason, let retryable):
+                let nextAttempt = job.attempts + 1
+                if retryable, nextAttempt < limits.retry.maxAttempts {
+                    await requeue(
+                        jobID: jobID, nextAttempt: nextAttempt, reason: reason,
+                        delay: RetryPolicy.backoff(attempt: job.attempts, limits: limits.retry)
+                    )
+                } else {
+                    await recordFailure(jobID: jobID, nextAttempt: nextAttempt, reason: reason)
+                }
+            case .retryAfter(let jobID, let reason, let providerDelay):
+                // The provider told us when to come back; honor that instead
+                // of the local backoff curve. The cap still applies so a
+                // hostile header cannot stall the queue indefinitely.
+                let nextAttempt = job.attempts + 1
+                if nextAttempt < limits.retry.maxAttempts {
+                    await requeue(
+                        jobID: jobID, nextAttempt: nextAttempt, reason: reason,
+                        delay: min(providerDelay, limits.retry.maxRetryAfterSeconds)
+                    )
+                } else {
+                    await recordFailure(jobID: jobID, nextAttempt: nextAttempt, reason: reason)
+                }
+            }
+        }
+    }
+
+    /// Requeue a retryable job and wait before picking it up again. The
+    /// wait is the caller-chosen delay: local escalating backoff for our own
+    /// retry decisions, the provider-directed Retry-After when one arrived.
+    private func requeue(jobID: Int64, nextAttempt: Int, reason: String, delay: TimeInterval) async {
+        try? catalog.updateJob(
+            id: jobID, state: .queued, attempts: nextAttempt,
+            lastError: reason, at: clock.now()
+        )
+        try? await clock.sleep(for: delay)
+    }
+
+    private func recordFailure(jobID: Int64, nextAttempt: Int, reason: String) async {
+        try? catalog.updateJob(
+            id: jobID, state: .failed, attempts: nextAttempt,
+            lastError: reason.isEmpty ? "failed" : reason, at: clock.now()
+        )
+    }
+
+    /// The synthetic capability probe: sends ONLY the 1x1 synthetic image,
+    /// never a user page. The caller supplies the key EXPLICITLY — the probe
+    /// never reads the credential store, so testing a draft endpoint with a
+    /// typed key cannot touch the saved pairing (Settings "Test Connection"
+    /// passes the ephemeral draft key; nothing here can mutate the store).
+    /// Records the result for the exact profile+model.
+    public func probeImageCapability(profile: ProviderProfile, apiKey: String) async -> ImageCapability {
+        guard !apiKey.isEmpty else {
+            return .rejected(reason: CredentialError.missingKey(profileID: profile.id).description)
+        }
+        do {
+            let request = try ProviderWire.makeRequest(
+                profile: profile, apiKey: apiKey, prompt: ProviderWire.syntheticTestPrompt,
+                imagePNGData: SyntheticProbeImage.png
+            )
+            let response = try await send(request)
+            switch response.status {
+            case 200:
+                _ = try ProviderWire.decodeTranscription(kind: profile.kind, body: response.body)
+                return .verified
+            case 401, 403:
+                return .rejected(reason: "authentication rejected — check the API key")
+            case 400, 404, 415, 422:
+                return .rejected(reason: "model rejected image input (status \(response.status)) — choose a vision-capable model")
+            default:
+                return .rejected(reason: "unexpected status \(response.status)")
+            }
+        } catch let error as HTTPFailure {
+            if case .rejectedEndpoint(let reason) = error {
+                return .rejected(reason: reason)
+            }
+            return .rejected(reason: "network failure: \(error.localizedDescription)")
+        } catch {
+            return .rejected(reason: String(describing: error))
+        }
+    }
+
+    private func send(_ request: WireRequest) async throws -> HTTPResponse {
+        // Defense in depth: policy runs here AND inside URLSessionTransport,
+        // so scripted/test transports cannot bypass it.
+        switch EndpointPolicy.validate(url: request.url) {
+        case .rejected(let reason):
+            throw OcrRunError.endpointRejected(reason: reason)
+        case .allowed:
+            break
+        }
+        do {
+            let response = try await transport.send(HTTPRequest(
+                url: request.url, method: request.method,
+                headers: request.headers, body: request.body
+            ))
+            guard (200..<300).contains(response.status) else {
+                let retryAfterHeader = response.headers["retry-after"]
+                let decision = RetryPolicy.decide(
+                    status: response.status,
+                    retryAfterHeader: retryAfterHeader,
+                    attempt: 0,
+                    limits: limits.retry
+                )
+                switch decision {
+                case .retryAfter(let delay, let reason):
+                    // A parseable Retry-After is a provider-directed wait and
+                    // must reach the drain loop verbatim (already capped) —
+                    // folding it into the local backoff would discard it.
+                    if let directed = RetryPolicy.parsedRetryAfter(retryAfterHeader) {
+                        throw OcrRunError.providerRetry(
+                            delay: min(directed, limits.retry.maxRetryAfterSeconds),
+                            reason: reason
+                        )
+                    }
+                    throw OcrRunError.retryable(delay: delay, reason: reason)
+                case .fail(let reason):
+                    throw OcrRunError.permanent(reason: reason)
+                }
+            }
+            return response
+        } catch let error as HTTPFailure {
+            if case .rejectedEndpoint(let reason) = error {
+                throw OcrRunError.endpointRejected(reason: reason)
+            }
+            // Network-level failures are retryable with bounded backoff.
+            throw OcrRunError.retryable(
+                delay: RetryPolicy.backoff(attempt: 0, limits: limits.retry),
+                reason: error.localizedDescription
+            )
+        }
+    }
+
+    /// Resolve the prompt text a queued job consented to. The job row pins
+    /// only the version NUMBER; the text is supplied by this build. A job
+    /// queued under a version this build does not know must never be
+    /// executed with a different prompt silently — that would process the
+    /// user's page under terms they never approved — so it returns nil and
+    /// the drain fails the job closed; re-enqueueing is a fresh, explicit
+    /// consent under the current prompt.
+    private static func prompt(for job: OcrJob) -> String? {
+        guard job.promptVersion == PromptVersion.current else { return nil }
+        return PromptVersion.text
+    }
+
+    private func checkRevisionFresh(job: OcrJob) throws {
+        guard let documentID = try catalog.documentID(revisionID: job.revisionID),
+              let current = try catalog.currentRevisionID(documentID: documentID),
+              current == job.revisionID else {
+            throw OcrRunError.staleResult(revisionID: job.revisionID)
+        }
+    }
+}

@@ -1,7 +1,7 @@
-# Starter — a clean SwiftUI macOS app template
+# BooxBridge — a clean SwiftUI macOS app template
 #
 # Quick start:
-#   make           # debug-builds via SwiftPM into ./build/Starter.app
+#   make           # debug-builds via SwiftPM into ./build/BooxBridge.app
 #   make run       # build + launch
 #   make check     # compile only, no bundling/signing (agent / CI gate)
 #   make test      # run the SwiftPM test suite
@@ -17,13 +17,13 @@
 # every reference (this Makefile included) in one pass.
 
 CONFIG       := debug
-APP          := build/Starter.app
+APP          := build/BooxBridge.app
 LSREGISTER   := /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister
-MIN_MACOS    := 14
+MIN_MACOS    := 26.1
 MIN_SWIFT    := 6.0
 
-APP_NAME      := Starter
-ENTITLEMENTS  := Starter/Starter.entitlements
+APP_NAME      := BooxBridge
+ENTITLEMENTS  := BooxBridge/BooxBridge.entitlements
 
 # ---------------------------------------------------------------------------
 # Release variables
@@ -56,7 +56,7 @@ NOTARY_PROFILE ?= starter-notary
 PROVISION_PROFILE ?=
 NOTES_FILE       ?=
 
-.PHONY: all deps build check test release run clean install uninstall register help \
+.PHONY: all deps build check test test-core release run clean install uninstall register help \
         icon check-version notary-setup sign zip-notary notarize staple zip-release \
         checksum verify-release dist github-release print-version
 
@@ -90,6 +90,11 @@ help:
 # Prerequisite checks
 # ---------------------------------------------------------------------------
 
+# MIN_MACOS is major.minor (Tahoe 26.1 floor); compare BOTH components so a
+# 26.0 machine correctly fails while 27.0 passes.
+MIN_MAJOR := $(word 1,$(subst ., ,$(MIN_MACOS)))
+MIN_MINOR := $(word 2,$(subst ., ,$(MIN_MACOS)))
+
 deps:
 	@echo "→ Checking build prerequisites..."
 	@OS_VERSION=$$(sw_vers -productVersion 2>/dev/null); \
@@ -97,8 +102,10 @@ deps:
 	  echo "  ✗ Could not detect macOS version. $(APP_NAME) only builds on macOS."; exit 1; \
 	fi; \
 	OS_MAJOR=$$(echo $$OS_VERSION | cut -d. -f1); \
-	if [ $$OS_MAJOR -lt $(MIN_MACOS) ]; then \
-	  echo "  ✗ macOS $$OS_VERSION — $(APP_NAME) requires macOS $(MIN_MACOS).0 or newer."; exit 1; \
+	OS_MINOR=$$(echo $$OS_VERSION | cut -d. -f2); \
+	OS_MINOR=$${OS_MINOR:-0}; \
+	if [ "$$OS_MAJOR" -lt $(MIN_MAJOR) ] || { [ "$$OS_MAJOR" -eq $(MIN_MAJOR) ] && [ "$$OS_MINOR" -lt $(MIN_MINOR) ]; }; then \
+	  echo "  ✗ macOS $$OS_VERSION — $(APP_NAME) requires macOS $(MIN_MACOS) or newer."; exit 1; \
 	fi; \
 	echo "  ✓ macOS $$OS_VERSION"
 	@command -v swift >/dev/null 2>&1 || { \
@@ -144,6 +151,13 @@ check: deps
 test: deps
 	swift test
 	@echo "✓ tests pass"
+
+# Linux/CI core gate: on macOS and Linux alike, runs the platform-neutral
+# core tests (the macOS app targets are excluded from the manifest on
+# Linux, so plain `swift test` is the core gate there).
+test-core:
+	swift test
+	@echo "✓ core tests pass"
 
 print-version:
 	@echo "VERSION=$(VERSION)"

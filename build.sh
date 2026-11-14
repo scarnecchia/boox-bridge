@@ -17,7 +17,7 @@
 set -euo pipefail
 
 CONFIG="${1:-debug}"
-APP_NAME="Starter"
+APP_NAME="BooxBridge"
 BUILD_DIR="build"
 APP="$BUILD_DIR/$APP_NAME.app"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
@@ -80,17 +80,20 @@ fi
 
 # ---------------------------------------------------------------------------
 # Codesign — try the named identity, fall back to ad-hoc so `make run`
-# always works on a fresh machine without certs.
+# always works on a fresh machine without certs. Both paths enable the
+# hardened runtime (required for Developer ID distribution, and the right
+# default for a non-sandboxed app that spawns external processes); no
+# library-validation or other runtime exceptions are granted.
 # ---------------------------------------------------------------------------
-sign_args=(--force --sign "$SIGN_IDENTITY")
+sign_args=(--force --sign "$SIGN_IDENTITY" --options runtime)
 if [ -f "$ENTITLEMENTS" ]; then
 	sign_args+=(--entitlements "$ENTITLEMENTS")
 fi
 
-echo "→ codesign ($SIGN_IDENTITY)"
+echo "→ codesign ($SIGN_IDENTITY, hardened runtime)"
 if ! codesign "${sign_args[@]}" "$APP" 2>/dev/null; then
 	echo "  identity '$SIGN_IDENTITY' unavailable — falling back to ad-hoc (-)"
-	codesign --force --sign - ${ENTITLEMENTS:+--entitlements "$ENTITLEMENTS"} "$APP"
+	codesign --force --sign - --options runtime ${ENTITLEMENTS:+--entitlements "$ENTITLEMENTS"} "$APP"
 fi
 
 codesign --verify --verbose=1 "$APP"

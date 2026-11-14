@@ -1,58 +1,32 @@
-# Progress
+# PROGRESS.md
 
-Running log. Append an entry per meaningful change: what you did, what you
-learned, what surprised you (`SWIFTUI-RULES.md` §10.1). Newest at the top.
+Review and delivery status for BooxBridge. Last updated: 2026-11-14.
 
-> Once you've renamed the template, the entry below is history — leave it as
-> the record of where the scaffold came from, and log your own work above it.
+## Current state
 
----
+- Branch `boox-bridge-implementation`; PR #1 is open at the pushed head. Merging stays with the operator (AGENTS.md).
+- PR #1 review: four two-reviewer code-review fix rounds complete. Round 1 landed before `19ee661`; rounds 2–4 are the `19ee661..88c0c27` range (fix branches `fix/pr1-adb-sync`, `fix/pr1-app-ui`, `fix/pr1-ocr-core`, `fix/r2-app-lifecycle`, `fix/r2-transport`, plus the final seam fixes at `77df9ec`..`88c0c27`).
+- Tests: 111 tests in 17 suites pass on Linux (`swift test`, core only), verified 2026-11-14.
+- macOS gate: the first `make check` on macOS (2026-11-14) found three type errors the static fixes at `88c0c27` missed — `NSBitmapImageRep(cgImage:)` is non-failable in the macOS 26 SDK but was still bound conditionally in `pageHashes`, and two SettingsView sites nested a double optional by calling `.map` with the failable `ProviderOrigin(url:)` initializer. All three are fixed and verified with a standalone `swiftc` replica (the `.map` shape reproduces the same diagnostic; `.flatMap` type-checks), but the fixed tree has not yet been compiled on macOS — re-run `make check`, then `make test` and `make run`, before merge (AGENTS.md "Verify your work").
 
-## 2026-06-28 — Metabolized learnings from the first app on this template
+## Contract and behavior changes from rounds 2–4 (`19ee661..88c0c27`)
 
-Folded `LEARNINGS.md` (general lessons from building the first app — an
-outdoor-weather feature — on this scaffold) into the permanent docs, then
-deleted the copy. Where each landed:
+- OcrRunner no longer holds a credential store: `drain(profileResolver:)` receives a `DrainCredential` (endpoint + key captured coherently per drain in `AppEnvironment.spawnDrain`); rotation takes effect on the next drain. Jobs execute their STORED model and prompt (the job row); unsupported prompt versions and empty model IDs fail closed without network.
+- Test Connection probes the draft origin with an ephemeral key only and never mutates stored credentials. All credential writes flow through CredentialFlow save plans (rotate at save time, fail-closed on keychain errors).
+- `CatalogStore.enqueueJob` resets terminal jobs in place: returns the job id for new-or-reset, nil only for an active dedupe hit, no throw for terminal duplicates. The new `terminalJobs(limit:)` query powers Activity history (update-time ordered, folder-independent).
+- `EndpointPolicy.normalizedOrigin` (scheme + host + effective port) is the single origin authority; redirects revalidate the full policy.
+- adb listings reject `stdoutTruncated` before parsing; AdbClient distinguishes absent-file / missing-tool nonzero exits from errors.
+- HTTPTransport: session-level delegate; cancellation bridges to the URLSessionTask with an immediate CancellationError; overlapping sends on one instance are safe.
+- OCRDrainOwnership: `requestStart(live)` arms a restart without cancelling; explicit Cancel disarms and cancels; stale completions are ignored.
+- PreviewSizing is a pure type that fits the preview to the viewport at zoom 1.0.
 
-- `SWIFTUI-RULES.md` **§5.6** — `foregroundStyle` resolves innermost-wins (a
-  tinted container can host a differently-colored inline child; the corollary
-  bites the "explicit `.foregroundStyle(.primary)`" habit).
-- `SWIFTUI-RULES.md` **§11 Swift Charts** (new) — overlaid lines need distinct
-  `series:` or they merge into one path; the x-domain is the union of all
-  plotted data, so clip overlays to the primary series' window.
-- `SWIFTUI-RULES.md` **§12 Concurrency** (new) — a `@MainActor` type adopting a
-  delegate protocol needs an isolated conformance (`@MainActor CLLocationManagerDelegate`).
-- `plans/build-system.md` — new "Permissions & capabilities" section: usage
-  prompts work in this ad-hoc-signed, no-Xcode bundle given the right
-  `NS…UsageDescription` keys; the sandbox decides whether a `com.apple.security.*`
-  entitlement is also needed; always design the denied path.
+## Known open (operator decision, intentionally unfixed)
 
-Appended §11/§12 rather than renumbering so the existing §9/§10 cross-references
-in `PLAN.md` / `PROGRESS.md` stay valid.
+1. `AppEnvironment.hasStoredKey` collapses Keychain read errors to false, so Save on a changed origin can keep the old secret.
+2. `saveProfiles` suppresses providers.json write failures, so a failed rotation write can pair the new key with the stale old endpoint after restart.
 
-## 2026-06-28 — Template scaffold (the "Starter" baseline)
+Both are documented in the PR #1 review record and were intentionally left open.
 
-Built the template this repo ships as:
+## Context files
 
-- **Build system** lifted from the Casette app's SwiftPM-only setup and
-  generalized: `Package.swift` (one exe + one test target, Swift 6 mode, no
-  deps), `build.sh` (swift build → `.app` → codesign, ad-hoc fallback),
-  `Makefile` (build/check/test/run/install + sign→notarize→staple→zip `dist`
-  pipeline), `Resources/Info.plist`, sandboxed `Starter.entitlements`,
-  `scripts/make-icon.swift` (pure-CoreGraphics doc-and-table glyph).
-- **App**: `NavigationSplitView` with a `SidebarSection` enum driving a lorem
-  reading column (`ReadingView`, measure-capped) and a native sortable `Table`
-  (`DataTableView`) with a reusable `StatusBadge` and a footer count. State in
-  one `@Observable @MainActor AppModel`; type/metrics centralized in `Theme`.
-- **`scripts/rename.sh`** — the meta feature: `cp -R` then one command renames
-  target, `.app`, bundle id, dirs, and file contents.
-- **Tests**: swift-testing suite covering model load + status sort ordering.
-- **Docs**: this file, `PLAN.md` (index, written for the fresh-copy workflow),
-  `PROBLEMS.md`, and `plans/{architecture,build-system,design-system,renaming}.md`.
-
-Gates run: `make check` ✓, `make test` ✓ (3 tests), `make build` ✓ (icon +
-signed `.app`), live launch ✓ — both destinations render correctly, app stays
-alive across a sidebar switch (no constraint crash).
-
-Design work was driven through the macos-design, typography-designer, and
-swiftui-pro skills per `CLAUDE.md`, before and after writing the views.
+- AGENTS.md re-verified against the code on 2026-11-14: all documented invariants intact (app name in its four coupled places, macOS 26.1 floor in its three places, core isolation, ProcessRunner exclusivity, Theme ownership of constants, `// pattern:` headers). No changes required.
