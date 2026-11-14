@@ -37,7 +37,14 @@ public struct TranscriptExporter {
         }
     }
 
+    /// Export publishes a page's persisted effective text. Once the user
+    /// has edited the page, that choice is final — including the choice to
+    /// clear the text, which must export as empty instead of resurrecting
+    /// the raw OCR. Only a never-edited page falls back to the raw
+    /// transcription (its effective text still mirrors the OCR output at
+    /// that point, so the fallback only covers pages awaiting an edit).
     func effectiveText(of page: PageTranscript) -> String {
+        if page.lastEditedAt != nil { return page.effectiveText }
         if !page.effectiveText.isEmpty { return page.effectiveText }
         return page.rawTranscription
     }
