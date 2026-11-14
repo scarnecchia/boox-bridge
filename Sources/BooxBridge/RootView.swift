@@ -117,7 +117,7 @@ struct DeviceStatusFooter: View {
     @Environment(AppEnvironment.self) private var app
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Metrics.footerStackSpacing) {
             switch app.devicePhase {
             case .connected:
                 Label(app.devicePhase.guidance, systemImage: "usb.drive.fill")
@@ -132,8 +132,8 @@ struct DeviceStatusFooter: View {
         }
         .font(TypeStyles.rowSecondary)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, Metrics.footerHorizontalInset)
+        .padding(.vertical, Metrics.footerVerticalInset)
         .accessibilityLabel("Device status: \(app.devicePhase.guidance)")
     }
 }

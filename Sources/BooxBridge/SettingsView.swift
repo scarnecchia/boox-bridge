@@ -7,13 +7,22 @@ import SwiftUI
 
 // The AppEnvironment comes from the Settings scene in BooxBridgeApp; the
 // child tabs read it with @Environment(AppEnvironment.self).
+extension ProviderOrigin {
+    /// Normalized origin via the core's canonical rule, so the app's
+    /// key-origin binding and the core's redirect guard can never disagree.
+    init?(url: URL) {
+        guard let origin = EndpointPolicy.normalizedOrigin(of: url) else { return nil }
+        self.init(scheme: origin.scheme, host: origin.host, port: origin.port)
+    }
+}
+
 struct SettingsView: View {
     var body: some View {
         TabView {
             ProviderSettingsTab().tabItem { Label("Providers", systemImage: "key.horizontal") }
             DeviceImportSettingsTab().tabItem { Label("Device Import", systemImage: "externaldrive") }
         }
-        .frame(width: 560, height: 480)
+        .frame(width: Metrics.settingsWindowWidth, height: Metrics.settingsWindowHeight)
     }
 }
 
@@ -42,7 +51,7 @@ struct ProviderSettingsTab: View {
                             Text(profile.modelID).font(TypeStyles.monoDetail)
                                 .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                         }
-                        Spacer(minLength: 8)
+                        Spacer(minLength: Metrics.rowTrailingSpacerMin)
                         if profile.id == app.activeProfile()?.id {
                             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                                 .accessibilityLabel("Used for transcription")
@@ -55,7 +64,7 @@ struct ProviderSettingsTab: View {
                     .tag(profile.id)
                 }
             }
-            .frame(height: 160)
+            .frame(height: Metrics.settingsProviderListHeight)
             // Inline buttons: .toolbar is not reliably rendered on a
             // Settings-scene TabView page.
             HStack {
@@ -64,7 +73,7 @@ struct ProviderSettingsTab: View {
                     .disabled(selectionID == nil)
                 Spacer()
             }
-            .padding(.horizontal).padding(.vertical, 6)
+            .padding(.horizontal).padding(.vertical, Metrics.settingsToolbarVerticalPadding)
             Divider()
             editor
                 .padding()

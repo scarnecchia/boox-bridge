@@ -28,6 +28,33 @@ enum Metrics {
     static let sheetWidth: CGFloat = 440
     static let activityQueueRowSpacing: CGFloat = 3
     static let activityRowSpacing: CGFloat = 2
+
+    // Settings window and Providers tab.
+    static let settingsWindowWidth: CGFloat = 560
+    static let settingsWindowHeight: CGFloat = 480
+    static let settingsProviderListHeight: CGFloat = 160
+    static let settingsToolbarVerticalPadding: CGFloat = 6
+
+    // Shared row anatomy: leading icon ↔ title, title ↔ secondary line, and
+    // the minimum trailing gap that keeps titles clear of row-end chips.
+    static let rowIconTextSpacing: CGFloat = 6
+    static let rowLineSpacing: CGFloat = 3
+    static let rowTrailingSpacerMin: CGFloat = 8
+
+    // Library list and search results rhythm.
+    static let toolbarActionSpacing: CGFloat = 8
+    static let emptyStateStackSpacing: CGFloat = 12
+    static let searchResultsStackSpacing: CGFloat = 4
+    static let searchHitLineSpacing: CGFloat = 2
+
+    // Device status footer inset into the sidebar.
+    static let footerStackSpacing: CGFloat = 4
+    static let footerHorizontalInset: CGFloat = 12
+    static let footerVerticalInset: CGFloat = 8
+
+    // Main window default size.
+    static let mainWindowDefaultWidth: CGFloat = 1180
+    static let mainWindowDefaultHeight: CGFloat = 740
 }
 
 enum TypeStyles {

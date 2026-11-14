@@ -27,7 +27,7 @@ struct LibraryView: View {
             }
             ToolbarItem {
                 if !selectedDocumentIDs.isEmpty {
-                    HStack(spacing: 8) {
+                    HStack(spacing: Metrics.toolbarActionSpacing) {
                         Button {
                             pendingMoveIDs = sortedSelection()
                             showMoveSheet = true
@@ -55,7 +55,7 @@ struct LibraryView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: Metrics.emptyStateStackSpacing) {
             if !app.searchText.isEmpty {
                 ContentUnavailableView("No matches",
                                        systemImage: "magnifyingglass",
@@ -76,13 +76,13 @@ struct LibraryView: View {
 
     private var searchResults: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Metrics.searchResultsStackSpacing) {
                 Text("Search results").font(TypeStyles.sectionHeader)
                 ForEach(app.searchResults) { hit in
                     Button {
                         selectedDocumentIDs = [hit.documentID]
                     } label: {
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: Metrics.searchHitLineSpacing) {
                             Text(hit.title).font(TypeStyles.rowTitle)
                             Text(hit.snippet).font(TypeStyles.rowSecondary)
                                 .foregroundStyle(.secondary)
@@ -179,15 +179,15 @@ struct LibraryRow: View {
     let document: DocumentSummary
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: Metrics.rowLineSpacing) {
+            HStack(spacing: Metrics.rowIconTextSpacing) {
                 Image(systemName: document.kind == .pdf ? "doc.richtext" : "photo")
                     .foregroundStyle(Color.accentColor)
                 Text(document.title)
                     .font(TypeStyles.rowTitle)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Spacer(minLength: 8)
+                Spacer(minLength: Metrics.rowTrailingSpacerMin)
                 if !document.folder.isEmpty {
                     Label(document.folder, systemImage: "folder")
                         .font(TypeStyles.monoDetail)
