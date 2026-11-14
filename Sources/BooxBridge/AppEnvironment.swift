@@ -45,6 +45,30 @@ struct ActivityEvent: Identifiable, Equatable {
     var detail: String?
 }
 
+/// Which slice of the library the list shows. `catalogFolder` maps to the
+/// catalog filter: nil = everything, "" = unfiled, a name = that folder.
+enum LibraryFolderFilter: Hashable {
+    case all
+    case unfiled
+    case named(String)
+
+    var catalogFolder: String? {
+        switch self {
+        case .all: return nil
+        case .unfiled: return ""
+        case .named(let name): return name
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .all: return "All Notes"
+        case .unfiled: return "Unfiled"
+        case .named(let name): return name
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class AppEnvironment {
@@ -58,9 +82,14 @@ final class AppEnvironment {
     private(set) var selectedSerial: String?
     private(set) var adbVersion: String?
     private(set) var adbPathError: String?
+    private(set) var folders: [String] = []
 
     var searchText: String = "" {
         didSet { Task { await refreshSearch() } }
+    }
+
+    var folderFilter: LibraryFolderFilter = .all {
+        didSet { refreshLibrarySync() }
     }
 
     // Provider profiles (non-secret) persisted as JSON; secrets stay in Keychain.
@@ -128,7 +157,8 @@ final class AppEnvironment {
                 catalog: catalog, storage: storage,
                 hasher: SHA256Hasher(),
                 validator: PDFKitDocumentValidator(storage: storage),
-                clock: clock
+                clock: clock,
+                fingerprinter: PDFKitPageFingerprinter()
             )
             if AppPaths.defaults.string(forKey: "adbExecutablePath") == nil {
                 devicePhase = .needsADBPath
@@ -199,7 +229,8 @@ final class AppEnvironment {
 
     func refreshLibrarySync() {
         do {
-            documents = try catalog.listDocuments()
+            documents = try catalog.listDocuments(folder: folderFilter.catalogFolder)
+            folders = try catalog.distinctFolders()
             activeJobs = try catalog.activeJobs()
         } catch {
             appendActivity(title: "Library refresh failed", detail: String(describing: error))
@@ -231,6 +262,16 @@ final class AppEnvironment {
         (try? catalog.pages(revisionID: revisionID)) ?? []
     }
 
+    /// Indices of the current revision's pages that have no transcription
+    /// text yet — the default OCR target so carried-over pages from an
+    /// updated import are never billed twice.
+    func pagesAwaitingTranscription(documentID: Int64) -> [Int] {
+        guard let document = document(id: documentID) else { return [] }
+        return pages(revisionID: document.currentPageRevisionID)
+            .filter { $0.rawTranscription.isEmpty && $0.effectiveText.isEmpty }
+            .map(\.pageIndex)
+    }
+
     func updateTranscript(pageID: Int64, text: String) {
         do {
             try catalog.updateEffectiveText(pageID: pageID, text: text, at: clock.now())
@@ -239,9 +280,26 @@ final class AppEnvironment {
         }
     }
 
-    func markDeleted(_ documentID: Int64) {
-        // Library-only deletion: no ADB side effects, originals retained.
-        try? catalog.markDocumentDeleted(documentID, at: clock.now())
+    /// Library-only deletion: no ADB side effects, originals retained.
+    func deleteDocuments(_ documentIDs: [Int64]) {
+        guard !documentIDs.isEmpty else { return }
+        try? catalog.markDocumentsDeleted(documentIDs, at: clock.now())
+        appendActivity(title: documentIDs.count == 1 ? "Removed 1 note" : "Removed \(documentIDs.count) notes")
+        refreshLibrarySync()
+    }
+
+    /// Assign notes to a library folder ("" removes them from any folder).
+    func moveToFolder(_ documentIDs: [Int64], folder: String) {
+        guard !documentIDs.isEmpty else { return }
+        do {
+            try catalog.setFolder(documentIDs: documentIDs, folder: folder, at: clock.now())
+            let name = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+            appendActivity(title: name.isEmpty
+                           ? "Removed \(documentIDs.count) note(s) from folder"
+                           : "Moved \(documentIDs.count) note(s) to “\(name)”")
+        } catch {
+            appendActivity(title: "Move failed", detail: String(describing: error))
+        }
         refreshLibrarySync()
     }
 
@@ -293,6 +351,8 @@ final class AppEnvironment {
         if s.newDocuments > 0 { parts.append("\(s.newDocuments) new") }
         if s.newRevisions > 0 { parts.append("\(s.newRevisions) updated") }
         if s.unchanged > 0 { parts.append("\(s.unchanged) unchanged") }
+        if s.duplicates > 0 { parts.append("\(s.duplicates) duplicate(s) skipped") }
+        if s.pagesCarried > 0 { parts.append("\(s.pagesCarried) page(s) carried over") }
         if !s.deferredUnstable.isEmpty { parts.append("\(s.deferredUnstable.count) deferred (still exporting)") }
         if !s.invalidFiles.isEmpty { parts.append("\(s.invalidFiles.count) invalid") }
         if !s.unsupported.isEmpty { parts.append("\(s.unsupported.count) unsupported (\(s.unsupported.map(\.extensionName).joined(separator: ", ")))") }
@@ -334,7 +394,12 @@ final class AppEnvironment {
         }
         guard let document = document(id: documentID),
               let revisionID = Int64(exactly: document.currentPageRevisionID) else { return }
-        let targets = indices ?? Array(0..<max(document.pageCount, 0))
+        let targets = indices ?? pagesAwaitingTranscription(documentID: documentID)
+        guard !targets.isEmpty else {
+            appendActivity(title: "OCR skipped",
+                           detail: "Every page already has transcription text.")
+            return
+        }
         var enqueued = 0
         for index in targets {
             if (try? catalog.enqueueJob(

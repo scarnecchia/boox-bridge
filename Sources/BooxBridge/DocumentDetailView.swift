@@ -74,8 +74,12 @@ struct DocumentDetailView: View {
             }
         }
         .sheet(isPresented: $showOCRDisclosure) {
-            OCRConsentSheet(document: document, pages: pages) {
-                Task { await app.enqueueOCR(documentID: documentID, pages: nil) }
+            OCRConsentSheet(awaitingCount: app.pagesAwaitingTranscription(documentID: documentID).count,
+                            totalCount: pages.count) { includeTranscribed in
+                Task {
+                    await app.enqueueOCR(documentID: documentID,
+                                         pages: includeTranscribed ? Array(0..<max(document.pageCount, 0)) : nil)
+                }
             }
         }
         .onAppear { loadTranscript(pages: pages, revisionID: revisionID) }
@@ -242,13 +246,18 @@ struct PagePreviewView: View {
     }
 }
 
-/// Explicit OCR disclosure: destination model, page count, and billing note
-/// before any request is queued.
+/// Explicit OCR disclosure: destination model, exact page count, and billing
+/// note before any request is queued. Defaults to pages without
+/// transcription text, so an updated import never re-bills pages whose
+/// content carried over; the toggle opts back into full re-transcription.
 struct OCRConsentSheet: View {
-    let document: DocumentSummary
-    let pages: [PageTranscript]
-    let onConfirm: () -> Void
+    let awaitingCount: Int
+    let totalCount: Int
+    let onConfirm: (_ includeTranscribed: Bool) -> Void
+    @State private var includeTranscribed = false
     @Environment(\.dismiss) private var dismiss
+
+    private var targetCount: Int { includeTranscribed ? totalCount : awaitingCount }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -260,21 +269,30 @@ struct OCRConsentSheet: View {
             } else {
                 Text("No provider profile is configured — add one in Settings → Providers.")
             }
-            Text("\(pages.count) page(s) will be sent as images to the provider. Requests may bill against your provider account, and the pages leave this Mac.")
+            if targetCount == 0 {
+                Text("Every page already has transcription text. Enable the option below to re-transcribe.")
+                    .font(TypeStyles.rowSecondary)
+                    .foregroundStyle(.secondary)
+            }
+            Text("\(targetCount) page(s) will be sent as images to the provider. Requests may bill against your provider account, and the pages leave this Mac.")
                 .font(TypeStyles.rowSecondary)
                 .foregroundStyle(.secondary)
+            if awaitingCount < totalCount {
+                Toggle("Re-transcribe pages that already have text", isOn: $includeTranscribed)
+                    .font(TypeStyles.rowSecondary)
+            }
             Text("Your edits are never overwritten; re-running OCR stores raw text separately.")
                 .font(TypeStyles.rowSecondary)
                 .foregroundStyle(.secondary)
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Transcribe \(pages.count) Page(s)") {
-                    onConfirm()
+                Button("Transcribe \(targetCount) Page(s)") {
+                    onConfirm(includeTranscribed)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(activeProfile == nil)
+                .disabled(activeProfile == nil || targetCount == 0)
             }
         }
         .padding(20)

@@ -8,14 +8,43 @@ import Testing
         Data("%PDF-1.7\n%\(salt)-\(pages)\n%%EOF".utf8)
     }
 
-    func makeService(transport: FakeDeviceTransport, directory: URL) throws -> DeviceImportService {
+    func makeService(transport: FakeDeviceTransport, directory: URL,
+                     fingerprinter: PageFingerprinting? = nil,
+                     validator: DocumentValidating = SniffingValidator()) throws -> DeviceImportService {
         let catalog = try CatalogStore.open(atPath: directory.appendingPathComponent("catalog.sqlite").path)
         let storage = try ManagedStorage(rootURL: directory.appendingPathComponent("library", isDirectory: true))
         return DeviceImportService(
             transport: transport, catalog: catalog, storage: storage,
-            hasher: SHA256Hasher(), validator: SniffingValidator(),
-            clock: ManualClock()
+            hasher: SHA256Hasher(), validator: validator,
+            clock: ManualClock(), fingerprinter: fingerprinter
         )
+    }
+
+    /// Validator that reports per-file page counts keyed by file content, so
+    /// incremental-import fixtures can simulate a notebook that grew.
+    struct ContentPageCountValidator: DocumentValidating {
+        var pageCounts: [String: Int]
+
+        func validate(fileAt url: URL) throws -> DocumentValidation {
+            let data = try Data(contentsOf: url)
+            let kind = DocumentSniffer.kind(of: data.prefix(512))
+            guard kind != .unsupported else {
+                throw DocumentValidationError.unreadable(kind: .unsupported)
+            }
+            let count = pageCounts[String(decoding: data, as: UTF8.self)] ?? 1
+            return DocumentValidation(kind: kind, pageCount: count)
+        }
+    }
+
+    /// Fingerprinter keyed by file content: distinguishes staged fixture
+    /// files without a real renderer.
+    struct ContentFingerprinter: PageFingerprinting {
+        var pagesByContent: [String: [Int: String]]
+
+        func sha256PerPage(fileAt url: URL) throws -> [Int: String] {
+            let data = try Data(contentsOf: url)
+            return pagesByContent[String(decoding: data, as: UTF8.self)] ?? [:]
+        }
     }
 
     let root = try! RemotePath("/sdcard/note")
@@ -231,6 +260,70 @@ import Testing
             #expect(second == nil)
             let third = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p", modelID: "m2", promptVersion: 1, at: Date())
             #expect(third != nil)
+        }
+    }
+
+    @Test func duplicateContentAtSecondPathIsSkippedAndNeverRePulled() async throws {
+        try await withTempDirectoryAsync { dir in
+            let transport = FakeDeviceTransport()
+            let payload = makePDF(salt: "same")
+            transport.seed(try root.appending("original.pdf"), data: payload, mtime: 100)
+            transport.seed(try root.appending("copy.pdf"), data: payload, mtime: 100)
+            let service = try makeService(transport: transport, directory: dir)
+            let catalog = try CatalogStore.open(atPath: dir.appendingPathComponent("catalog.sqlite").path)
+
+            let first = try await service.sync(root: importRoot)
+            #expect(first.newDocuments == 1)
+            #expect(first.duplicates == 1)
+            #expect(try catalog.listDocuments().count == 1)
+
+            // The aliased path counts as unchanged from then on: no more
+            // pulling identical bytes on every sync.
+            let second = try await service.sync(root: importRoot)
+            #expect(second.unchanged == 2)
+            #expect(second.duplicates == 0)
+            #expect(transport.pullCalls == 2)
+        }
+    }
+
+    @Test func pageCarryOverPreservesTranscriptionOnGrownNotebook() async throws {
+        try await withTempDirectoryAsync { dir in
+            let v1 = makePDF(salt: "v1")
+            let v2 = makePDF(salt: "v2")
+            let fingerprinter = ContentFingerprinter(pagesByContent: [
+                String(decoding: v1, as: UTF8.self): [0: "p0", 1: "p1"],
+                String(decoding: v2, as: UTF8.self): [0: "p0", 1: "p1", 2: "p2"],
+            ])
+            let validator = ContentPageCountValidator(pageCounts: [
+                String(decoding: v1, as: UTF8.self): 2,
+                String(decoding: v2, as: UTF8.self): 3,
+            ])
+            let transport = FakeDeviceTransport()
+            let path = try root.appending("journal.pdf")
+            transport.seed(path, data: v1, mtime: 100)
+            let service = try makeService(transport: transport, directory: dir,
+                                          fingerprinter: fingerprinter, validator: validator)
+            let catalog = try CatalogStore.open(atPath: dir.appendingPathComponent("catalog.sqlite").path)
+
+            _ = try await service.sync(root: importRoot)
+            let documentID = try catalog.listDocuments().first!.id
+            let revision1 = try catalog.currentRevisionID(documentID: documentID)!
+            try catalog.recordTranscription(revisionID: revision1, pageIndex: 0, rawText: "alpha", at: Date())
+            try catalog.recordTranscription(revisionID: revision1, pageIndex: 1, rawText: "beta", at: Date())
+
+            transport.update(path, data: v2, mtime: 200)
+            let second = try await service.sync(root: importRoot)
+            #expect(second.newRevisions == 1)
+            #expect(second.pagesCarried == 2)
+
+            let revision2 = try catalog.currentRevisionID(documentID: documentID)!
+            #expect(revision2 != revision1)
+            let pages = try catalog.pages(revisionID: revision2)
+            #expect(pages.count == 3)
+            #expect(pages[0].rawTranscription == "alpha")
+            #expect(pages[1].rawTranscription == "beta")
+            #expect(pages[2].rawTranscription.isEmpty)
+            #expect(try catalog.search(matching: "alpha").count == 1)
         }
     }
 }

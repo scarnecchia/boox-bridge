@@ -37,6 +37,9 @@ public enum ImportOutcome: Equatable, Sendable {
     case newDocument(documentID: Int64, revisionID: Int64)
     case newRevision(documentID: Int64, revisionID: Int64)
     case unchanged(documentID: Int64, revisionID: Int64)
+    /// Identical content already belongs to a live document; the importing
+    /// path was recorded as a duplicate alias, not a new library entry.
+    case duplicate(documentID: Int64)
 }
 
 public final class CatalogStore: @unchecked Sendable {
@@ -109,6 +112,23 @@ public final class CatalogStore: @unchecked Sendable {
           UNIQUE(revision_id, page_index, profile_id, model_id, prompt_version)
         );
         """,
+        // v2: content-level duplicate imports. A path whose bytes match a
+        // live document's revision is recorded here instead of becoming a
+        // second library entry; snapshots() unions these rows so the
+        // planner treats the path as unchanged instead of re-pulling the
+        // same bytes on every sync.
+        """
+        CREATE TABLE duplicate_imports(
+          serial TEXT NOT NULL,
+          root_id TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          sha256 TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          remote_mtime INTEGER NOT NULL,
+          remote_size INTEGER NOT NULL,
+          PRIMARY KEY(serial, root_id, relative_path)
+        );
+        """,
     ]
 
     static func migrate(_ db: SQLiteDatabase) throws {
@@ -163,10 +183,16 @@ public final class CatalogStore: @unchecked Sendable {
 
     public func snapshots(forSerial serial: String, rootID: String) throws -> [String: ImportSnapshot] {
         let rows = try db.query("""
-        SELECT d.relative_path, r.sha256, r.remote_size, r.remote_mtime, d.kind
-        FROM documents d JOIN revisions r ON r.id = d.current_revision_id
-        WHERE d.serial = ? AND d.root_id = ? AND d.deleted_at IS NULL
-        """, bindings: [.text(serial), .text(rootID)])
+        SELECT relative_path, sha256, remote_size, remote_mtime, kind FROM (
+          SELECT d.relative_path AS relative_path, r.sha256 AS sha256, r.remote_size AS remote_size,
+                 r.remote_mtime AS remote_mtime, d.kind AS kind
+          FROM documents d JOIN revisions r ON r.id = d.current_revision_id
+          WHERE d.serial = ? AND d.root_id = ? AND d.deleted_at IS NULL
+          UNION ALL
+          SELECT relative_path, sha256, remote_size, remote_mtime, kind
+          FROM duplicate_imports WHERE serial = ? AND root_id = ?
+        )
+        """, bindings: [.text(serial), .text(rootID), .text(serial), .text(rootID)])
         var result: [String: ImportSnapshot] = [:]
         for row in rows {
             guard case .text(let path) = row[0],
@@ -193,7 +219,8 @@ public final class CatalogStore: @unchecked Sendable {
         remoteMtime: Int64,
         remoteSize: Int64,
         at date: Date,
-        title: String? = nil
+        title: String? = nil,
+        carryPageMatches: [PageCarry.Match] = []
     ) throws -> ImportOutcome {
         try db.transaction {
             // Lookup ignores deleted_at: re-importing a locally deleted
@@ -226,6 +253,28 @@ public final class CatalogStore: @unchecked Sendable {
                     return .unchanged(documentID: documentID, revisionID: revisionID)
                 }
             } else {
+                // Cross-path duplicate: identical bytes already belong to a
+                // live document (device rename, second root, re-import).
+                // Record the path as an alias so snapshots() marks it
+                // unchanged instead of re-pulling identical content forever.
+                // Deleted documents never block: a deliberately removed
+                // library entry must not swallow its successor.
+                let canonical = try db.query("""
+                    SELECT r.document_id FROM revisions r
+                    JOIN documents d ON d.id = r.document_id
+                    WHERE r.sha256 = ? AND d.deleted_at IS NULL
+                    LIMIT 1
+                    """, bindings: [.text(contentSHA256)])
+                if case .integer(let canonicalID) = canonical.first?.first {
+                    try db.execute("""
+                    INSERT OR REPLACE INTO duplicate_imports
+                      (serial, root_id, relative_path, sha256, kind, remote_mtime, remote_size)
+                    VALUES(?,?,?,?,?,?,?)
+                    """, bindings: [.text(key.serial), .text(key.rootID), .text(key.relativePath),
+                                    .text(contentSHA256), .text(kind.rawValue),
+                                    .integer(remoteMtime), .integer(remoteSize)])
+                    return .duplicate(documentID: canonicalID)
+                }
                 let resolvedTitle = title ?? URL(fileURLWithPath: key.relativePath).lastPathComponent
                 try db.execute("""
                 INSERT INTO documents(serial, root_id, relative_path, title, folder, kind, current_revision_id,
@@ -235,6 +284,11 @@ public final class CatalogStore: @unchecked Sendable {
                                 .text(resolvedTitle), .text(""), .text(kind.rawValue),
                                 .real(date.timeIntervalSince1970), .real(date.timeIntervalSince1970)])
                 documentID = db.lastInsertRowID()
+                // The path now owns a real document; a stale alias from
+                // earlier duplicate detection must not shadow it in
+                // snapshots().
+                try db.execute("DELETE FROM duplicate_imports WHERE serial=? AND root_id=? AND relative_path=?",
+                               bindings: [.text(key.serial), .text(key.rootID), .text(key.relativePath)])
             }
 
             try db.execute("""
@@ -256,6 +310,22 @@ public final class CatalogStore: @unchecked Sendable {
             let prior = try db.query("SELECT current_revision_id FROM documents WHERE id=?", bindings: [.integer(documentID)])
             if case .null = prior.first?.first { wasFirstRevision = true } else { wasFirstRevision = false }
 
+            // Page carry-over: copy raw/effective text (and edit marks) from
+            // the previous revision into matching pages of the new one, so a
+            // re-export that only adds pages never orphans transcription.
+            if !carryPageMatches.isEmpty, case .integer(let sourceRevisionID) = prior.first?.first {
+                for match in carryPageMatches {
+                    let source = try db.query(
+                        "SELECT raw_text, effective_text, edited_at FROM pages WHERE revision_id=? AND page_index=?",
+                        bindings: [.integer(sourceRevisionID), .integer(Int64(match.oldPage))])
+                    guard let row = source.first, row.count == 3 else { continue }
+                    try db.execute(
+                        "UPDATE pages SET raw_text=?, effective_text=?, edited_at=? WHERE revision_id=? AND page_index=?",
+                        bindings: [row[0], row[1], row[2],
+                                   .integer(revisionID), .integer(Int64(match.newPage))])
+                }
+            }
+
             try db.execute("UPDATE documents SET current_revision_id=?, updated_at=? WHERE id=?",
                            bindings: [.integer(revisionID), .real(date.timeIntervalSince1970), .integer(documentID)])
             try refreshFTS(documentID: documentID)
@@ -267,8 +337,16 @@ public final class CatalogStore: @unchecked Sendable {
         }
     }
 
-    public func listDocuments(includeDeleted: Bool = false) throws -> [DocumentSummary] {
-        let filter = includeDeleted ? "" : "WHERE d.deleted_at IS NULL"
+    /// folder: nil = every document, "" = unfiled, a name = that folder.
+    public func listDocuments(includeDeleted: Bool = false, folder: String? = nil) throws -> [DocumentSummary] {
+        var conditions: [String] = []
+        var bindings: [SQLiteValue] = []
+        if !includeDeleted { conditions.append("d.deleted_at IS NULL") }
+        if let folder {
+            conditions.append("d.folder = ?")
+            bindings.append(.text(folder))
+        }
+        let filter = conditions.isEmpty ? "" : "WHERE \(conditions.joined(separator: " AND ")) "
         let rows = try db.query("""
         SELECT d.id, d.serial, d.root_id, d.relative_path, d.title, d.folder, d.kind,
                COALESCE(d.current_revision_id, 0),
@@ -276,7 +354,7 @@ public final class CatalogStore: @unchecked Sendable {
                COALESCE((SELECT r.page_count FROM revisions r WHERE r.id = d.current_revision_id), 0),
                d.created_at, d.updated_at
         FROM documents d \(filter) ORDER BY d.updated_at DESC
-        """)
+        """, bindings: bindings)
         return rows.compactMap(Self.summary(from:))
     }
 
@@ -375,6 +453,40 @@ public final class CatalogStore: @unchecked Sendable {
         try db.execute("UPDATE documents SET deleted_at=?, updated_at=? WHERE id=?",
                        bindings: [.real(date.timeIntervalSince1970), .real(date.timeIntervalSince1970), .integer(documentID)])
         try db.execute("DELETE FROM notes_fts WHERE rowid=?", bindings: [.integer(documentID)])
+    }
+
+    /// Bulk form of markDocumentDeleted in one transaction.
+    public func markDocumentsDeleted(_ documentIDs: [Int64], at date: Date) throws {
+        try db.transaction {
+            for documentID in documentIDs {
+                try db.execute("UPDATE documents SET deleted_at=?, updated_at=? WHERE id=?",
+                               bindings: [.real(date.timeIntervalSince1970), .real(date.timeIntervalSince1970), .integer(documentID)])
+                try db.execute("DELETE FROM notes_fts WHERE rowid=?", bindings: [.integer(documentID)])
+            }
+        }
+    }
+
+    /// Folders are the distinct `folder` values of live documents; the empty
+    /// string means unfiled and never lists as a folder name.
+    public func distinctFolders() throws -> [String] {
+        let rows = try db.query("""
+        SELECT DISTINCT folder FROM documents WHERE deleted_at IS NULL AND folder != '' ORDER BY folder
+        """)
+        return rows.compactMap { Self.string($0.first ?? .null) }
+    }
+
+    /// Assign documents to a library folder ("" = unfiled). The name is
+    /// trimmed; folder text is part of the FTS index, so touched documents
+    /// reindex.
+    public func setFolder(documentIDs: [Int64], folder: String, at date: Date) throws {
+        let name = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+        try db.transaction {
+            for documentID in documentIDs {
+                try db.execute("UPDATE documents SET folder=?, updated_at=? WHERE id=?",
+                               bindings: [.text(name), .real(date.timeIntervalSince1970), .integer(documentID)])
+                try refreshFTS(documentID: documentID)
+            }
+        }
     }
 
     /// Enqueue a job unless an active (queued/running) job with the same

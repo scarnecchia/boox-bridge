@@ -4,6 +4,7 @@
 // only sees the seams.
 
 import BooxBridgeCore
+import AppKit
 import PDFKit
 import Security
 import Foundation
@@ -230,4 +231,43 @@ enum AppPaths {
     }
 
     static var defaults: UserDefaults { .standard }
+}
+
+/// Computes per-page content hashes for import carry-over (see PageCarry).
+/// Pages render through the same PDFKit path as previews with a small fixed
+/// fingerprint size, so both sides of a comparison see identical bytes for
+/// identical page content. Best-effort by design: any thrown error degrades
+/// to no carry-over, never to a failed import.
+struct PDFKitPageFingerprinter: PageFingerprinting {
+    /// Identity-only renders, not previews: small enough to keep imports
+    /// cheap, fixed so both compared revisions encode identically.
+    private let fingerprintMaxDimension: CGFloat = 480
+
+    func sha256PerPage(fileAt url: URL) throws -> [Int: String] {
+        let head = (try FileHandle(forReadingFrom: url).read(upToCount: 512)) ?? Data()
+        let hasher = SHA256Hasher()
+        switch DocumentSniffer.kind(of: head) {
+        case .pdf:
+            guard let document = PDFDocument(url: url) else {
+                throw DocumentValidationError.unreadable(kind: .pdf)
+            }
+            var hashes: [Int: String] = [:]
+            for index in 0..<document.pageCount {
+                guard let page = document.page(at: index) else { continue }
+                let rendered = try PDFKitPageRenderer.render(page: page, maxDimension: fingerprintMaxDimension)
+                hashes[index] = hasher.sha256Hex(of: rendered)
+            }
+            return hashes
+        case .png, .jpeg:
+            guard let image = NSImage(contentsOf: url),
+                  let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let rep = NSBitmapImageRep(cgImage: cgImage),
+                  let png = rep.representation(using: .png, properties: [:]) else {
+                throw DocumentValidationError.unreadable(kind: DocumentSniffer.kind(of: head))
+            }
+            return [0: hasher.sha256Hex(of: png)]
+        case .unsupported:
+            throw DocumentValidationError.unsupportedFormat(detail: "file is not a PDF, PNG, or JPEG")
+        }
+    }
 }

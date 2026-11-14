@@ -25,6 +25,10 @@ public struct ImportSummary: Equatable, Sendable {
     public var newDocuments = 0
     public var newRevisions = 0
     public var unchanged = 0
+    /// Paths skipped because their content already lives in the library.
+    public var duplicates = 0
+    /// Pages whose transcription text carried over into a new revision.
+    public var pagesCarried = 0
     public var deferredUnstable: [String] = []
     public var invalidFiles: [InvalidImportFile] = []
     public var unsupported: [ImportPlan.UnsupportedItem] = []
@@ -54,6 +58,7 @@ public actor DeviceImportService {
     private let hasher: ContentHashing
     private let validator: DocumentValidating
     private let clock: WallClock
+    private let fingerprinter: PageFingerprinting?
 
     private var runningRoots: Set<String> = []
     private var inFlight: [String: Task<ImportSummary, Error>] = [:]
@@ -64,7 +69,8 @@ public actor DeviceImportService {
         storage: ManagedStorage,
         hasher: ContentHashing = SHA256Hasher(),
         validator: DocumentValidating = SniffingValidator(),
-        clock: WallClock = SystemClock()
+        clock: WallClock = SystemClock(),
+        fingerprinter: PageFingerprinting? = nil
     ) {
         self.transport = transport
         self.catalog = catalog
@@ -72,6 +78,7 @@ public actor DeviceImportService {
         self.hasher = hasher
         self.validator = validator
         self.clock = clock
+        self.fingerprinter = fingerprinter
     }
 
     /// Startup recovery: orphaned staging directories are garbage; committed
@@ -110,13 +117,17 @@ public actor DeviceImportService {
         summary.unsupported = plan.unsupported
 
         for pull in plan.pulls {
+            let relative = ImportPlanner.relativePath(of: pull.record.path, root: root.remoteRoot)
             do {
-                let outcome = try await importOne(pull: pull, root: root)
-                switch outcome {
+                let result = try await importOne(pull: pull, root: root,
+                                                 previousRevisionSHA256: snapshots[relative]?.revisionSHA256)
+                switch result.outcome {
                 case .newDocument: summary.newDocuments += 1
                 case .newRevision: summary.newRevisions += 1
                 case .unchanged: summary.unchanged += 1
+                case .duplicate: summary.duplicates += 1
                 }
+                summary.pagesCarried += result.carriedPages
             } catch let error as DocumentValidationError {
                 summary.invalidFiles.append(InvalidImportFile(path: pull.record.path.raw, reason: String(describing: error)))
             } catch ImportErrorDeferred.unstable(let reason) {
@@ -132,7 +143,13 @@ public actor DeviceImportService {
         case unstable(String)
     }
 
-    private func importOne(pull: ImportPlan.Pull, root: ImportRoot) async throws -> ImportOutcome {
+    private struct ImportResult {
+        let outcome: ImportOutcome
+        let carriedPages: Int
+    }
+
+    private func importOne(pull: ImportPlan.Pull, root: ImportRoot,
+                           previousRevisionSHA256: String?) async throws -> ImportResult {
         let remote = pull.record.path
         let serial = root.serial
 
@@ -173,11 +190,22 @@ public actor DeviceImportService {
         let attributes = try FileManager.default.attributesOfItem(atPath: stagedFile.path)
         let sizeBytes = (attributes[.size] as? NSNumber)?.int64Value ?? pull.record.sizeBytes
 
+        // Page carry-over is best-effort: fingerprint failures degrade to no
+        // carry-over (those pages start blank and can be transcribed
+        // manually), never to a failed import.
+        var carries: [PageCarry.Match] = []
+        if let fingerprinter, let previousSHA = previousRevisionSHA256,
+           let previousURL = try? storage.originalURL(revisionSHA256: previousSHA) {
+            let oldPages = (try? fingerprinter.sha256PerPage(fileAt: previousURL)) ?? [:]
+            let newPages = (try? fingerprinter.sha256PerPage(fileAt: stagedFile)) ?? [:]
+            carries = PageCarry.plan(old: oldPages, new: newPages)
+        }
+
         // Commit content first; the catalog transaction references it.
         _ = try storage.commit(stagedFile: stagedFile, contentSHA256: localHash)
 
         let relative = ImportPlanner.relativePath(of: remote, root: root.remoteRoot)
-        return try catalog.commitImport(
+        let outcome = try catalog.commitImport(
             key: DocumentKey(serial: serial, rootID: root.id, relativePath: relative),
             kind: validation.kind,
             contentSHA256: localHash,
@@ -185,7 +213,11 @@ public actor DeviceImportService {
             pageCount: validation.pageCount,
             remoteMtime: postStat.modifiedEpochSeconds,
             remoteSize: postStat.sizeBytes,
-            at: clock.now()
+            at: clock.now(),
+            carryPageMatches: carries
         )
+        let carriedPages: Int
+        if case .newRevision = outcome { carriedPages = carries.count } else { carriedPages = 0 }
+        return ImportResult(outcome: outcome, carriedPages: carriedPages)
     }
 }

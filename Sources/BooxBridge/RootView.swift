@@ -31,7 +31,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 struct RootView: View {
     @Environment(AppEnvironment.self) private var app
     @State private var section: AppSection = .library
-    @State private var selectedDocumentID: Int64?
+    @State private var selectedDocumentIDs: Set<Int64> = []
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
@@ -67,7 +67,7 @@ struct RootView: View {
         } content: {
             switch section {
             case .library:
-                LibraryView(selectedDocumentID: $selectedDocumentID)
+                LibraryView(selectedDocumentIDs: $selectedDocumentIDs)
                     .navigationSplitViewColumnWidth(min: Metrics.contentColumnMinWidth,
                                                     ideal: Metrics.contentColumnIdealWidth,
                                                     max: Metrics.contentColumnMaxWidth)
@@ -85,8 +85,12 @@ struct RootView: View {
         } detail: {
             switch section {
             case .library:
-                if let documentID = selectedDocumentID {
+                if selectedDocumentIDs.count == 1, let documentID = selectedDocumentIDs.first {
                     DocumentDetailView(documentID: documentID)
+                } else if selectedDocumentIDs.count > 1 {
+                    ContentUnavailableView("\(selectedDocumentIDs.count) notes selected",
+                                           systemImage: "checkmark.circle",
+                                           description: Text("Use the toolbar to move or remove them."))
                 } else {
                     ContentUnavailableView("Select a note",
                                            systemImage: "doc.text.magnifyingglass")

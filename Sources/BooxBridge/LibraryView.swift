@@ -5,7 +5,10 @@ import SwiftUI
 
 struct LibraryView: View {
     @Environment(AppEnvironment.self) private var app
-    @Binding var selectedDocumentID: Int64?
+    @Binding var selectedDocumentIDs: Set<Int64>
+
+    @State private var showMoveSheet = false
+    @State private var pendingMoveIDs: [Int64] = []
 
     var body: some View {
         Group {
@@ -18,6 +21,36 @@ struct LibraryView: View {
             }
         }
         .navigationTitle("Library")
+        .toolbar {
+            ToolbarItem {
+                folderPicker
+            }
+            ToolbarItem {
+                if !selectedDocumentIDs.isEmpty {
+                    HStack(spacing: 8) {
+                        Button {
+                            pendingMoveIDs = sortedSelection()
+                            showMoveSheet = true
+                        } label: {
+                            Label("Move to Folder", systemImage: "folder.badge.gearshape")
+                        }
+                        .accessibilityLabel("Move selected notes to folder")
+                        Button {
+                            confirmDelete(sortedSelection())
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .accessibilityLabel("Remove selected notes from library")
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showMoveSheet) {
+            MoveToFolderSheet(folders: app.folders, noteCount: pendingMoveIDs.count) { folder in
+                app.moveToFolder(pendingMoveIDs, folder: folder)
+                selectedDocumentIDs = []
+            }
+        }
         .onAppear { app.refreshLibrary() }
     }
 
@@ -47,7 +80,7 @@ struct LibraryView: View {
                 Text("Search results").font(TypeStyles.sectionHeader)
                 ForEach(app.searchResults) { hit in
                     Button {
-                        selectedDocumentID = hit.documentID
+                        selectedDocumentIDs = [hit.documentID]
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(hit.title).font(TypeStyles.rowTitle)
@@ -64,17 +97,57 @@ struct LibraryView: View {
         }
     }
 
-    // Selection-driven detail: the detail column renders the selected
-    // document. Mixing NavigationLink pushes with a selection List is
-    // undefined behavior per Apple and did not navigate on macOS 26.
+    // Multi-select List: cmd/shift-click selects several notes for the bulk
+    // toolbar actions; a single selection drives the detail column (see
+    // RootView — selection-driven detail, no NavigationLink pushes).
     private var documentList: some View {
-        List(app.documents, selection: $selectedDocumentID) { document in
+        List(app.documents, selection: $selectedDocumentIDs) { document in
             LibraryRow(document: document)
                 .contextMenu {
-                    Button("Reveal Original in Finder") { revealOriginal(document) }
-                    Button("Delete from Library…", role: .destructive) { confirmDelete(document) }
+                    contextActions(for: document)
                 }
         }
+    }
+
+    private var folderPicker: some View {
+        Picker("Folder", selection: Binding(
+            get: { app.folderFilter },
+            set: { filter in
+                app.folderFilter = filter
+                selectedDocumentIDs = []
+            })) {
+            Text(LibraryFolderFilter.all.label).tag(LibraryFolderFilter.all)
+            Text(LibraryFolderFilter.unfiled.label).tag(LibraryFolderFilter.unfiled)
+            ForEach(app.folders, id: \.self) { name in
+                Text(name).tag(LibraryFolderFilter.named(name))
+            }
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+        .accessibilityLabel("Filter library by folder")
+    }
+
+    @ViewBuilder
+    private func contextActions(for document: DocumentSummary) -> some View {
+        Button("Reveal Original in Finder") { revealOriginal(document) }
+        Button("Move to Folder…") {
+            pendingMoveIDs = targetIDs(for: document)
+            showMoveSheet = true
+        }
+        Divider()
+        Button("Delete from Library…", role: .destructive) {
+            confirmDelete(targetIDs(for: document))
+        }
+    }
+
+    /// Context actions cover the whole selection when the row under the
+    /// cursor is part of it, otherwise that row alone.
+    private func targetIDs(for document: DocumentSummary) -> [Int64] {
+        selectedDocumentIDs.contains(document.id) ? sortedSelection() : [document.id]
+    }
+
+    private func sortedSelection() -> [Int64] {
+        selectedDocumentIDs.sorted()
     }
 
     private func revealOriginal(_ document: DocumentSummary) {
@@ -83,17 +156,21 @@ struct LibraryView: View {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    private func confirmDelete(_ document: DocumentSummary) {
+    private func confirmDelete(_ ids: [Int64]) {
         // Library-only deletion: originals and revisions are retained, and
         // nothing is ever sent to the device.
+        let subject = ids.count == 1
+            ? "“\(app.document(id: ids[0])?.title ?? "note")”"
+            : "\(ids.count) notes"
         NSApp.requestUserAttention(.criticalRequest)
         let alert = NSAlert()
-        alert.messageText = "Remove “\(document.title)” from the library?"
+        alert.messageText = "Remove \(subject) from the library?"
         alert.informativeText = "The original file and its revisions stay on this Mac. Nothing is deleted from the Boox."
         alert.addButton(withTitle: "Remove from Library")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
-            app.markDeleted(document.id)
+            app.deleteDocuments(ids)
+            for id in ids { selectedDocumentIDs.remove(id) }
         }
     }
 }
@@ -111,6 +188,12 @@ struct LibraryRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 8)
+                if !document.folder.isEmpty {
+                    Label(document.folder, systemImage: "folder")
+                        .font(TypeStyles.monoDetail)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 if document.revisionCount > 1 {
                     Text("\(document.revisionCount) revisions")
                         .font(TypeStyles.monoDetail)
@@ -126,5 +209,63 @@ struct LibraryRow: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(document.title), \(document.pageCount) pages")
+    }
+}
+
+/// Move dialog for one or more notes: pick an existing folder, choose
+/// "None (unfiled)", or type a new name. A non-empty name wins over the
+/// picker, so creating a folder needs no mode switch.
+struct MoveToFolderSheet: View {
+    let folders: [String]
+    let noteCount: Int
+    let onMove: (String) -> Void
+
+    @State private var existingFolder: String?
+    @State private var newFolderName = ""
+    @Environment(\.dismiss) private var dismiss
+
+    init(folders: [String], noteCount: Int, onMove: @escaping (String) -> Void) {
+        self.folders = folders
+        self.noteCount = noteCount
+        self.onMove = onMove
+        _existingFolder = State(initialValue: folders.first)
+    }
+
+    /// Empty result means unfiled; it is only reachable via the explicit
+    /// picker choice, so a stray click cannot silently unfile notes.
+    private var targetFolder: String {
+        let typed = newFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return typed.isEmpty ? (existingFolder ?? "") : typed
+    }
+
+    private var canMove: Bool {
+        !newFolderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || existingFolder != nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Move \(noteCount) note\(noteCount == 1 ? "" : "s") to folder")
+                .font(TypeStyles.detailTitle)
+            Picker("Existing folder", selection: $existingFolder) {
+                Text("None (unfiled)").tag(String?.none)
+                ForEach(folders, id: \.self) { name in
+                    Text(name).tag(String?.some(name))
+                }
+            }
+            TextField("New folder name", text: $newFolderName)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Move") {
+                    onMove(targetFolder)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canMove)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
     }
 }
