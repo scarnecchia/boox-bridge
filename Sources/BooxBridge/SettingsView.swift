@@ -149,7 +149,7 @@ struct ProviderSettingsTab: View {
     private func addProfile() {
         // A fresh instance each time: the shared `custom` preset carries one
         // fixed UUID for the whole process, and duplicate ids corrupt the list.
-        var next = ProviderProfile(
+        let next = ProviderProfile(
             displayName: "New Provider",
             kind: ProviderPresets.custom.kind,
             baseURL: ProviderPresets.custom.baseURL,
