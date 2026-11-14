@@ -16,7 +16,10 @@ public enum StorageError: Error, Equatable, Sendable, CustomStringConvertible {
 
 public final class ManagedStorage: Sendable {
     public let rootURL: URL
-    private let fileManager = FileManager.default
+    // Computed, not stored: the Apple SDK does not mark FileManager Sendable.
+    // `.default` is a documented thread-safe singleton, so per-call access
+    // is equivalent.
+    private var fileManager: FileManager { FileManager.default }
 
     public init(rootURL: URL) throws {
         self.rootURL = rootURL
