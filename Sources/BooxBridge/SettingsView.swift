@@ -261,7 +261,7 @@ struct ProviderSettingsTab: View {
                 }
             case .storeDraftKey:
                 do {
-                    try app.credentials.saveSecret(draftKey, for: id)
+                    try app.credentials.saveSecret(draftKey, forProfileID: id)
                     draftKey = ""
                 } catch {
                     // Fail-closed: report the storage failure instead of

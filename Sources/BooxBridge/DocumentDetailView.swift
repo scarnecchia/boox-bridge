@@ -268,7 +268,7 @@ struct PagePreviewView: View {
     var body: some View {
         Group {
             if let image {
-                ImageView(image: image, zoomScale: zoomScale)
+                ImageView(image: image, zoomScale: zoomScale, viewportSize: viewportSize)
             } else {
                 ProgressView("Rendering page…")
             }
