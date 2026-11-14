@@ -86,10 +86,15 @@ public enum AdbCommandBuilder {
     /// before the tab so the path may legally contain tabs, spaces,
     /// newlines, quotes, and leading hyphens.
     ///
-    /// The inner sh -c script uses only double quotes, so it can be safely
-    /// single-quoted by ShellQuoting inside the outer script.
+    /// `find -exec … {} +` passes a BATCH of files as positional parameters
+    /// to one sh -c invocation, so the inner script must iterate ALL of
+    /// them (`for f do … done`) — handling only "$1" silently drops every
+    /// file after the first in each batch. The inner script uses only
+    /// double quotes, so it can be safely single-quoted by ShellQuoting
+    /// inside the outer script. Verified end-to-end by
+    /// listingScriptEndToEndAgainstRealShell.
     static func listingScript(for root: RemotePath, filesOnly: Bool = true) -> String {
-        let inner = "printf \"%s\\t\" \"$(stat -c '%s|%Y|%F' -- \"$1\")\"; printf \"%s\\0\" \"$1\""
+        let inner = "for f do printf \"%s\\t\" \"$(stat -c '%s|%Y|%F' -- \"$f\")\"; printf \"%s\\0\" \"$f\"; done"
             .replacingOccurrences(of: "'", with: "'\\''")
         let typeFilter = filesOnly ? " -type f" : ""
         return "find \(ShellQuoting.quote(root))\(typeFilter) -exec sh -c '"

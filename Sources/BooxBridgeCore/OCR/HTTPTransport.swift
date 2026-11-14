@@ -72,6 +72,13 @@ public struct URLSessionTransport: HTTPTransporting {
             break
         }
 
+        let guard_ = RedirectGuardDelegate(originalURL: request.url)
+        // Same-origin redirects re-attach OUR credentials; cross-origin
+        // redirects are cancelled below. Without this, the server-built
+        // redirect request would either strip or replay headers we never set.
+        guard_.authorizationHeader = request.headers["Authorization"]
+        guard_.apiKeyHeader = request.headers["x-api-key"]
+
         var urlRequest = URLRequest(url: request.url)
         urlRequest.httpMethod = request.method
         urlRequest.httpBody = request.body
@@ -79,7 +86,6 @@ public struct URLSessionTransport: HTTPTransporting {
             urlRequest.setValue(value, forHTTPHeaderField: name)
         }
 
-        let delegate = RedirectGuardDelegate(originalURL: request.url)
         let task = session.dataTask(with: urlRequest)
 
         do {
@@ -87,7 +93,7 @@ public struct URLSessionTransport: HTTPTransporting {
                 let box = ContinuationBox(continuation)
                 // URLSession retains the task delegate until completion, so
                 // no external retention is needed.
-                task.delegate = ComposedTask(delegate: delegate, box: box)
+                task.delegate = ComposedTask(delegate: guard_, box: box)
                 task.resume()
             }
         } catch let error as NSError {

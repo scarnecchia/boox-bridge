@@ -77,6 +77,7 @@ final class AppEnvironment {
     let scenario: ScenarioKind?
 
     private let transportBox: TransportBox
+    private var recoveryTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
     private var ocrTask: Task<Void, Never>?
 
@@ -134,16 +135,10 @@ final class AppEnvironment {
         // Launch recovery: orphan staging cleanup; interrupted OCR jobs
         // surface as resumable failures, never silently restarted.
         try? catalog.recoverInterruptedJobs(at: clock.now())
-        let task = Task { [importer] in
+        recoveryTask = Task { [importer] in
             await importer.recoverAfterLaunch()
         }
-        unowned_tasks_note(task)
         refreshLibrarySync()
-    }
-
-    private func unowned_tasks_note(_ task: Task<Void, Never>) {
-        // Keep a reference so the task isn't dropped; stored in pollingTask slot lazily.
-        pollingTask = task
     }
 
     // MARK: - Lifecycle

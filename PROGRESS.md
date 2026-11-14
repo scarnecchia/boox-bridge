@@ -8,6 +8,45 @@ learned, what surprised you (`SWIFTUI-RULES.md` §10.1). Newest at the top.
 
 ---
 
+## 2026-11-13 — Adversarial review round 1: findings fixed with regression coverage
+
+A general-purpose reviewer audited the full tree (concurrency, shell
+injection/path isolation, credential leakage, durability, wire contracts,
+static macOS-UI risk). Headline findings and dispositions — all fixed,
+each critical/high covered by a new regression test (60 tests now pass on
+Linux, ~1.5s):
+
+1. **CRITICAL (verified by reviewer, now regression-tested end-to-end):**
+   the remote listing script read only `$1`, but `find -exec sh -c … {} +`
+   passes each batch as positional parameters — one record per batch was
+   emitted and the rest silently dropped. Fixed with `for f do … done`;
+   `listingScriptEndToEndAgainstRealShell` now runs the actual script via
+   /bin/sh over a 16-file hostile-name tree and requires every record.
+2. **CRITICAL:** launch recovery stored its Task in `pollingTask`, so
+   device polling could never start. Separate `recoveryTask` property.
+3. **HIGH:** Cancel OCR did not stop the drain loop — the loop now checks
+   `Task.isCancelled` before scheduling each page (in-flight request may
+   still complete/bill, as the UI discloses).
+4. **HIGH:** unchanged content with changed mtime never refreshed stored
+   remote metadata → permanent re-pull loop. The dupe path now updates
+   `remote_mtime`/`remote_size`; test proves the planner then classifies
+   the file unchanged.
+5. **HIGH:** re-importing a locally deleted document hit the UNIQUE
+   constraint. Lookup now ignores `deleted_at` and re-import RESTORES
+   visibility (same content → unchanged; new content → new revision on
+   the restored document) — both covered by tests.
+6. **MEDIUM:** same-origin redirects re-attached a nil Authorization
+   header (stripping auth). The transport now carries our original
+   credential headers onto allowed redirects only.
+7. **MEDIUM:** editing a profile's base URL silently reused the stored
+   key for a new host. Settings now clears the stored key when the
+   endpoint host/scheme changes and tells the user to re-enter it.
+
+The reviewer's remaining findings were low-severity/style items not
+itemized in the retained report; credential handling was assessed sound
+(secrets never reach errors, logs, or the catalog). macOS/device checks
+remain pending exactly as listed above.
+
 ## 2026-11-13 — Boox Bridge implementation (automatable scope complete on Linux)
 
 Implemented the approved plan end-to-end for everything Linux-verifiable;

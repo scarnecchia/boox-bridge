@@ -60,8 +60,8 @@ import Testing
         let script = AdbCommandBuilder.listingScript(for: root)
         #expect(script.contains("find '/sdcard/note' -type f"))
         #expect(script.contains("sh -c"))
-        #expect(script.contains("-- \"$1\""))
-        #expect(script.contains("printf \"%s\\0\" \"$1\""))
+        #expect(script.contains("-- \"$f\""))
+        #expect(script.contains("printf \"%s\\0\" \"$f\""))
     }
 
     @Test func listingParserHandlesHostileRecords() throws {

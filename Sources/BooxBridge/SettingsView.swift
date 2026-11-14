@@ -170,6 +170,15 @@ struct ProviderSettingsTab: View {
               let url = URL(string: draftBaseURL.trimmingCharacters(in: .whitespaces)) else { return }
         let updated = ProviderProfile(id: id, displayName: draftName, kind: draftKind,
                                       baseURL: url, modelID: draftModel.trimmingCharacters(in: .whitespaces))
+        // Key-host binding: a changed endpoint must never silently reuse the
+        // old secret for a new host — clear it and require re-entry.
+        if let previous = app.profiles.first(where: { $0.id == id }),
+           previous.baseURL.host != url.host || previous.baseURL.scheme != url.scheme {
+            try? app.credentials.deleteSecret(forProfileID: id)
+            capability = .unknown
+            app.appendActivity(title: "API key cleared",
+                               detail: "Endpoint changed for \(updated.displayName) — re-enter the key for the new host.")
+        }
         app.saveProfiles(app.profiles.map { $0.id == id ? updated : $0 })
         if !draftKey.isEmpty {
             app.storeAPIKey(draftKey, for: id)

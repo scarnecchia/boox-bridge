@@ -206,19 +206,33 @@ public final class CatalogStore: @unchecked Sendable {
         title: String? = nil
     ) throws -> ImportOutcome {
         try db.transaction {
+            // Lookup ignores deleted_at: re-importing a locally deleted
+            // document RESTORES it (clears deleted_at) instead of hitting
+            // the UNIQUE(serial, root_id, relative_path) constraint.
             let existing = try db.query(
-                "SELECT id FROM documents WHERE serial=? AND root_id=? AND relative_path=? AND deleted_at IS NULL",
+                "SELECT id, deleted_at FROM documents WHERE serial=? AND root_id=? AND relative_path=?",
                 bindings: [.text(key.serial), .text(key.rootID), .text(key.relativePath)]
             )
             let documentID: Int64
             if case .integer(let id) = existing.first?.first {
                 documentID = id
-                // Content already recorded for this document → no-op.
+                if existing.first?.count == 2, case .real = existing.first?[1] {
+                    // Was soft-deleted: restore visibility (revisions intact).
+                    try db.execute("UPDATE documents SET deleted_at=NULL, updated_at=? WHERE id=?",
+                                   bindings: [.real(date.timeIntervalSince1970), .integer(documentID)])
+                }
+                // Content already recorded for this document → no-op, but
+                // refresh the device-side metadata so unchanged content
+                // with a changed mtime does not re-pull on every sync.
                 let dupe = try db.query(
                     "SELECT id FROM revisions WHERE document_id=? AND sha256=?",
                     bindings: [.integer(documentID), .text(contentSHA256)]
                 )
                 if case .integer(let revisionID) = dupe.first?.first {
+                    try db.execute(
+                        "UPDATE revisions SET remote_mtime=?, remote_size=? WHERE id=?",
+                        bindings: [.integer(remoteMtime), .integer(remoteSize), .integer(revisionID)]
+                    )
                     return .unchanged(documentID: documentID, revisionID: revisionID)
                 }
             } else {

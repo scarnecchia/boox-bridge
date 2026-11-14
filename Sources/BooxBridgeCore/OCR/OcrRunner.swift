@@ -132,6 +132,10 @@ public actor OcrRunner {
         profileResolver: @Sendable (_ profileID: String) -> ProviderProfile?
     ) async {
         while let job = try? catalog.nextQueuedJob() {
+            // Cancellation stops SCHEDULING new pages; a request already in
+            // flight may complete (and may already have been billed — the UI
+            // discloses this on cancel).
+            if Task.isCancelled { break }
             guard let profile = profileResolver(job.profileID) else {
                 try? catalog.updateJob(
                     id: job.id, state: .failed, attempts: job.attempts + 1,
