@@ -48,10 +48,24 @@ public struct OcrRunnerLimits: Sendable {
     public init() {}
 }
 
+/// One drain-time resolution of a provider profile: the profile snapshot AND
+/// its API key, read at the same instant. Endpoint and key always travel as
+/// a coherent pair — a rotation saved while a drain is live can never
+/// combine the old endpoint with the new key (or vice versa); it takes
+/// effect on the NEXT drain, when the caller captures fresh pairs.
+public struct DrainCredential: Equatable, Sendable {
+    public let profile: ProviderProfile
+    public let apiKey: String
+
+    public init(profile: ProviderProfile, apiKey: String) {
+        self.profile = profile
+        self.apiKey = apiKey
+    }
+}
+
 public actor OcrRunner {
     private let catalog: CatalogStore
     private let transport: HTTPTransporting
-    private let credentials: CredentialStoring
     private let renderer: PageRendering
     private let clock: WallClock
     private let limits: OcrRunnerLimits
@@ -59,14 +73,12 @@ public actor OcrRunner {
     public init(
         catalog: CatalogStore,
         transport: HTTPTransporting,
-        credentials: CredentialStoring,
         renderer: PageRendering,
         clock: WallClock = SystemClock(),
         limits: OcrRunnerLimits = OcrRunnerLimits()
     ) {
         self.catalog = catalog
         self.transport = transport
-        self.credentials = credentials
         self.renderer = renderer
         self.clock = clock
         self.limits = limits
@@ -77,12 +89,13 @@ public actor OcrRunner {
     public func execute(
         job: OcrJob,
         profile: ProviderProfile,
+        apiKey: String,
         prompt: String = PromptVersion.text
     ) async -> OcrOutcome {
         do {
             try checkRevisionFresh(job: job)
 
-            guard let key = try credentials.secret(forProfileID: profile.id), !key.isEmpty else {
+            guard !apiKey.isEmpty else {
                 throw OcrRunError.keyMissing(profileID: profile.id)
             }
 
@@ -96,7 +109,7 @@ public actor OcrRunner {
             )
 
             let request = try ProviderWire.makeRequest(
-                profile: profile, apiKey: key, prompt: prompt,
+                profile: profile, apiKey: apiKey, prompt: prompt,
                 imagePNGData: imageData
             )
 
@@ -143,22 +156,27 @@ public actor OcrRunner {
     /// which the UI must disclose.
     ///
     /// Consent fidelity: the job row persists the exact (profile, model,
-    /// prompt-version) tuple the user approved at enqueue time. The profile
-    /// is the LIVE side of that tuple — its base URL and API key are
-    /// rotatable credentials and are always read at execution — but the
-    /// MODEL and PROMPT must come from the job, not from whatever the
-    /// profile currently points at. Otherwise a paused queue resumed after
-    /// a provider-settings edit would transcribe pages under settings the
-    /// user never approved while history still names the old model.
+    /// prompt-version) tuple the user approved at enqueue time. The MODEL and
+    /// PROMPT must come from the job, not from whatever the profile currently
+    /// points at; otherwise a paused queue resumed after a provider-settings
+    /// edit would transcribe pages under settings the user never approved
+    /// while history still names the old model.
+    ///
+    /// Credential coherence: the resolver supplies endpoint and key as ONE
+    /// DrainCredential per profile, captured at drain start by the caller.
+    /// The runner holds no credential store at all — it cannot fetch secrets
+    /// mid-drain — so a rotation saved while the drain is live can never
+    /// pair the old endpoint with the new key; the new pairing takes effect
+    /// on the next drain.
     public func drain(
-        profileResolver: @Sendable (_ profileID: String) -> ProviderProfile?
+        profileResolver: @Sendable (_ profileID: String) -> DrainCredential?
     ) async {
         while let job = try? catalog.nextQueuedJob() {
             if Task.isCancelled { break }
-            guard let profile = profileResolver(job.profileID) else {
+            guard let credential = profileResolver(job.profileID) else {
                 try? catalog.updateJob(
                     id: job.id, state: .failed, attempts: job.attempts + 1,
-                    lastError: "profile \(job.profileID) is no longer configured", at: clock.now()
+                    lastError: "profile \(job.profileID) has no usable endpoint/API key pairing at drain start — check Settings → Providers and re-enqueue the page", at: clock.now()
                 )
                 continue
             }
@@ -177,13 +195,14 @@ public actor OcrRunner {
                 continue
             }
             // The job's stored model wins over the profile's current one;
-            // everything else (endpoint, key, adapter kind) stays live.
-            var effectiveProfile = profile
+            // endpoint and key come from the drain-time pair as a unit.
+            var effectiveProfile = credential.profile
             effectiveProfile.modelID = job.modelID
             try? catalog.updateJob(
                 id: job.id, state: .running, attempts: job.attempts, lastError: nil, at: clock.now()
             )
-            let outcome = await execute(job: job, profile: effectiveProfile, prompt: prompt)
+            let outcome = await execute(job: job, profile: effectiveProfile,
+                                        apiKey: credential.apiKey, prompt: prompt)
             switch outcome {
             case .succeeded:
                 continue

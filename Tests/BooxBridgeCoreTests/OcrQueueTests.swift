@@ -24,12 +24,17 @@ final class ScriptedTransport: HTTPTransporting, @unchecked Sendable {
         failures.append(failure)
     }
 
+    /// Runs at the start of each send, under the lock — a test can rotate
+    /// the credential store while a request is in flight (mid-drain rotation).
+    var onSend: (() -> Void)?
+
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         try nextResponse(for: request)
     }
 
     private func nextResponse(for request: HTTPRequest) throws -> HTTPResponse {
         lock.lock(); defer { lock.unlock() }
+        onSend?()
         recorded.append(Recorded(url: request.url.absoluteString, headers: request.headers, body: request.body))
         if !failures.isEmpty {
             throw failures.removeFirst()
@@ -51,10 +56,16 @@ struct FixedRenderer: PageRendering {
         let catalog = try CatalogStore.open(atPath: directory.appendingPathComponent("c.sqlite").path)
         let credentials = InMemoryCredentialStore()
         let runner = OcrRunner(
-            catalog: catalog, transport: transport, credentials: credentials,
+            catalog: catalog, transport: transport,
             renderer: FixedRenderer(), clock: ManualClock()
         )
         return (catalog, runner, credentials)
+    }
+
+    /// The drain-time pair a resolver hands the runner: profile and key as
+    /// one unit captured before the drain starts (see DrainCredential).
+    func bound(_ profile: ProviderProfile, key: String = "k-1") -> DrainCredential {
+        DrainCredential(profile: profile, apiKey: key)
     }
 
     func seedDocument(catalog: CatalogStore, pages: Int = 1) throws -> (Int64, Int64) {
@@ -90,7 +101,7 @@ struct FixedRenderer: PageRendering {
             ) == nil)
 
             transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"page text"}]}]}"#.utf8)))
-            await runner.drain(profileResolver: { $0 == "p1" ? profile : nil })
+            await runner.drain(profileResolver: { $0 == "p1" ? bound(profile) : nil })
 
             let pages = try catalog.pages(revisionID: revisionID)
             #expect(pages[0].rawTranscription == "page text")
@@ -117,7 +128,7 @@ struct FixedRenderer: PageRendering {
             transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"raw one"}]}]}"#.utf8)))
             _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
                                        modelID: "m", promptVersion: 1, at: Date())
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in bound(profile) })
 
             let pages = try catalog.pages(revisionID: revisionID)
             try catalog.updateEffectiveText(pageID: pages[0].id, text: "my edited version", at: Date())
@@ -125,7 +136,7 @@ struct FixedRenderer: PageRendering {
             transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"raw two"}]}]}"#.utf8)))
             _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
                                        modelID: "m2", promptVersion: 1, at: Date())
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in bound(profile) })
 
             let after = try catalog.pages(revisionID: revisionID)[0]
             #expect(after.rawTranscription == "raw two")
@@ -139,9 +150,9 @@ struct FixedRenderer: PageRendering {
     /// model while the queue is paused must not silently retarget queued
     /// pages: the executed request must carry the job's STORED model, even
     /// though the profile object handed to the drain names a different one.
-    /// The endpoint is the live-credential half of the profile and follows
-    /// the edit — asserted here so both halves of the contract are pinned.
-    @Test func drainedJobExecutesStoredModelAgainstLiveEndpoint() async throws {
+    /// The endpoint and key are the drain-time pair the resolver supplies —
+    /// here the edited profile with its key — so both travel as one unit.
+    @Test func drainedJobExecutesStoredModelAgainstDrainTimePair() async throws {
         try await withTempDirectoryAsync { dir in
             let transport = ScriptedTransport()
             let (catalog, runner, credentials) = try makeFixture(transport: transport, directory: dir)
@@ -157,7 +168,7 @@ struct FixedRenderer: PageRendering {
                                          baseURL: URL(string: "https://api.example.com/edited")!, modelID: "m-current")
 
             transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"page text"}]}]}"#.utf8)))
-            await runner.drain(profileResolver: { _ in edited })
+            await runner.drain(profileResolver: { _ in bound(edited) })
 
             #expect(transport.recorded.count == 1)
             let wire = try #require(transport.recorded.first)
@@ -168,7 +179,8 @@ struct FixedRenderer: PageRendering {
             let input = try #require(body["input"] as? [[String: Any]])
             let parts = try #require(input.first?["content"] as? [[String: Any]])
             #expect(parts.first?["text"] as? String == PromptVersion.text)
-            // Endpoint and key are live credentials: they follow the edit.
+            // Endpoint and key are the drain-time pair from the resolver —
+            // asserted here so both halves of the contract are pinned.
             #expect(wire.url.hasSuffix("/edited/responses"))
             #expect(wire.headers["Authorization"] == "Bearer k-1")
 
@@ -193,7 +205,7 @@ struct FixedRenderer: PageRendering {
             _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
                                        modelID: "m", promptVersion: PromptVersion.current + 1, at: Date())
 
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in bound(profile) })
 
             #expect(transport.recorded.isEmpty)
             let job = try catalog.jobs(revisionID: revisionID).first!
@@ -202,7 +214,10 @@ struct FixedRenderer: PageRendering {
         }
     }
 
-    @Test func missingKeyFailsVisiblyWithoutNetworkCall() async throws {
+    /// A resolver answer of nil — in the app this is a profile missing from
+    /// the drain-time snapshot, e.g. no API key stored at drain start —
+    /// fails the job visibly without any network call.
+    @Test func unusablePairFailsVisiblyWithoutNetworkCall() async throws {
         try await withTempDirectoryAsync { dir in
             let transport = ScriptedTransport()
             let (catalog, runner, _) = try makeFixture(transport: transport, directory: dir)
@@ -211,12 +226,67 @@ struct FixedRenderer: PageRendering {
             let (_, revisionID) = try seedDocument(catalog: catalog)
             _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
                                        modelID: "m", promptVersion: 1, at: Date())
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in nil })
             #expect(transport.recorded.isEmpty)
             #expect(try catalog.activeJobs().isEmpty)
             let job = try catalog.jobs(revisionID: revisionID).first!
             #expect(job.state == .failed)
             #expect(job.lastError?.contains("API key") == true)
+            _ = profile
+        }
+    }
+
+    /// Mid-drain rotation must never cross origins: every request in a drain
+    /// carries the endpoint+key pair resolved AT DRAIN START, as one unit.
+    /// Before the pairing fix, the endpoint came from a profile snapshot
+    /// while the key was re-fetched from the store for EVERY page — so a
+    /// rotation saved mid-drain sent the NEW key to the OLD endpoint on
+    /// later pages. Rotation takes effect on the NEXT drain instead.
+    @Test func drainKeepsEndpointAndKeyCoherentWhenCredentialsRotateMidDrain() async throws {
+        try await withTempDirectoryAsync { dir in
+            let transport = ScriptedTransport()
+            let catalog = try CatalogStore.open(atPath: dir.appendingPathComponent("c.sqlite").path)
+            let credentials = InMemoryCredentialStore()
+            let runner = OcrRunner(catalog: catalog, transport: transport,
+                                   renderer: FixedRenderer(), clock: ManualClock())
+            try credentials.saveSecret("KA", forProfileID: "p1")
+            let profileA = ProviderProfile(id: "p1", displayName: "A", kind: .openAI,
+                                           baseURL: URL(string: "https://api-a.example.com/v1")!, modelID: "m")
+            let (_, revisionID) = try seedDocument(catalog: catalog, pages: 2)
+            _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
+                                       modelID: "m", promptVersion: PromptVersion.current, at: Date())
+            _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 1, profileID: "p1",
+                                       modelID: "m", promptVersion: PromptVersion.current, at: Date())
+
+            // The drain-time pair, captured before any rotation: A + KA.
+            let drainPair = DrainCredential(profile: profileA, apiKey: "KA")
+            // The user saves B/KB while the FIRST request is in flight:
+            // the store now holds KB, and a save would point the profile at B.
+            transport.onSend = { try? credentials.saveSecret("KB", forProfileID: "p1") }
+
+            await runner.drain(profileResolver: { _ in drainPair })
+
+            #expect(transport.recorded.count == 2)
+            for (index, wire) in transport.recorded.enumerated() {
+                #expect(wire.url.hasSuffix("api-a.example.com/v1/responses"),
+                        "request \(index) must use the drain-time endpoint, not the rotated one")
+                #expect(wire.headers["Authorization"] == "Bearer KA",
+                        "request \(index) must carry the drain-time key, not the mid-drain rotation")
+            }
+
+            // The rotation goes live on the NEXT drain: re-enqueue one page
+            // and drain with the freshly captured pair B/KB.
+            _ = try catalog.enqueueJob(revisionID: revisionID, pageIndex: 0, profileID: "p1",
+                                       modelID: "m", promptVersion: PromptVersion.current, at: Date())
+            transport.onSend = nil
+            let profileB = ProviderProfile(id: "p1", displayName: "B", kind: .openAI,
+                                           baseURL: URL(string: "https://api-b.example.com/v1")!, modelID: "m")
+            let nextPair = DrainCredential(profile: profileB, apiKey: "KB")
+            await runner.drain(profileResolver: { _ in nextPair })
+
+            let last = try #require(transport.recorded.last)
+            #expect(last.url.hasSuffix("api-b.example.com/v1/responses"))
+            #expect(last.headers["Authorization"] == "Bearer KB")
         }
     }
 
@@ -235,7 +305,7 @@ struct FixedRenderer: PageRendering {
                 status: 400,
                 body: Data("bad request with \(secret) inside".utf8)
             ))
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in bound(profile) })
             let job = try catalog.jobs(revisionID: revisionID).first!
             #expect(job.state == .failed)
             #expect(job.lastError != nil && !job.lastError!.contains(secret))
@@ -261,7 +331,7 @@ struct FixedRenderer: PageRendering {
                 remoteMtime: 2, remoteSize: 12, at: Date()
             )
 
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in bound(profile) })
 
             let currentRevision = try catalog.currentRevisionID(documentID: documentID)!
             #expect(currentRevision != revisionV1)
@@ -318,7 +388,7 @@ struct FixedRenderer: PageRendering {
             let credentials = InMemoryCredentialStore()
             var limits = OcrRunnerLimits()
             limits.retry = RetryLimits(maxAttempts: 4, baseBackoffSeconds: 2, maxBackoffSeconds: 60, maxRetryAfterSeconds: 300)
-            let runner = OcrRunner(catalog: catalog, transport: transport, credentials: credentials,
+            let runner = OcrRunner(catalog: catalog, transport: transport,
                                    renderer: FixedRenderer(), clock: clock, limits: limits)
             try credentials.saveSecret("k-1", forProfileID: "p1")
             let profile = ProviderProfile(id: "p1", displayName: "P", kind: .openAI,
@@ -332,7 +402,7 @@ struct FixedRenderer: PageRendering {
                 body: Data(#"{"error":{"message":"slow down"}}"#.utf8)
             ))
             transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"page text"}]}]}"#.utf8)))
-            await runner.drain(profileResolver: { $0 == "p1" ? profile : nil })
+            await runner.drain(profileResolver: { $0 == "p1" ? bound(profile) : nil })
 
             // Exactly one requeue sleep, and it is the provider's 37s — not
             // the 2s local initial backoff the drain used to fall back to.
@@ -350,7 +420,7 @@ struct FixedRenderer: PageRendering {
             let clock = ManualClock()
             let catalog = try CatalogStore.open(atPath: dir.appendingPathComponent("c.sqlite").path)
             let credentials = InMemoryCredentialStore()
-            let runner = OcrRunner(catalog: catalog, transport: transport, credentials: credentials,
+            let runner = OcrRunner(catalog: catalog, transport: transport,
                                    renderer: FixedRenderer(), clock: clock)
             try credentials.saveSecret("k-1", forProfileID: "p1")
             let profile = ProviderProfile(id: "p1", displayName: "P", kind: .openAI,
@@ -365,7 +435,7 @@ struct FixedRenderer: PageRendering {
             let header = formatter.string(from: Date().addingTimeInterval(15))
             transport.enqueue(HTTPResponse(status: 429, headers: ["retry-after": header], body: Data()))
             transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"page text"}]}]}"#.utf8)))
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in bound(profile) })
 
             #expect(clock.recordedSleeps.count == 1)
             let slept = clock.recordedSleeps.first ?? -1
@@ -381,7 +451,7 @@ struct FixedRenderer: PageRendering {
             let credentials = InMemoryCredentialStore()
             var limits = OcrRunnerLimits()
             limits.retry = RetryLimits(maxAttempts: 4, baseBackoffSeconds: 2, maxBackoffSeconds: 60, maxRetryAfterSeconds: 300)
-            let runner = OcrRunner(catalog: catalog, transport: transport, credentials: credentials,
+            let runner = OcrRunner(catalog: catalog, transport: transport,
                                    renderer: FixedRenderer(), clock: clock, limits: limits)
             try credentials.saveSecret("k-1", forProfileID: "p1")
             let profile = ProviderProfile(id: "p1", displayName: "P", kind: .openAI,
@@ -393,7 +463,7 @@ struct FixedRenderer: PageRendering {
             // A hostile or stuck header must not stall the queue for hours.
             transport.enqueue(HTTPResponse(status: 429, headers: ["retry-after": "99999"], body: Data()))
             transport.enqueue(HTTPResponse(status: 200, body: Data(#"{"output":[{"content":[{"type":"output_text","text":"page text"}]}]}"#.utf8)))
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in bound(profile) })
 
             #expect(clock.recordedSleeps == [300])
             let job = try catalog.jobs(revisionID: revisionID).first!

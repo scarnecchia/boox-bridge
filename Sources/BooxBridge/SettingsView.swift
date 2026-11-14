@@ -319,7 +319,7 @@ struct ProviderSettingsTab: View {
             testing = true
             defer { testing = false }
             let runner = OcrRunner(catalog: app.catalog, transport: URLSessionTransport(),
-                                   credentials: app.credentials, renderer: app.renderer, clock: app.clock)
+                                   renderer: app.renderer, clock: app.clock)
             capability = await runner.probeImageCapability(profile: profile, apiKey: apiKey)
         }
     }

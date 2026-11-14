@@ -49,7 +49,7 @@ import Testing
         let catalog = try CatalogStore.open(atPath: directory.appendingPathComponent("c.sqlite").path)
         let credentials = InMemoryCredentialStore()
         let runner = OcrRunner(
-            catalog: catalog, transport: transport, credentials: credentials,
+            catalog: catalog, transport: transport,
             renderer: StillRenderer(), clock: ManualClock()
         )
         return (catalog, runner, credentials)
@@ -101,7 +101,7 @@ import Testing
 
             transport.enqueue(transcription("first pass"))
             let firstID = try enqueue(catalog, revisionID: revisionID)
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in DrainCredential(profile: profile, apiKey: "k-1") })
             #expect(try catalog.job(id: firstID)!.state == .succeeded)
             #expect(try catalog.pages(revisionID: revisionID)[0].effectiveText == "first pass")
 
@@ -114,7 +114,7 @@ import Testing
             #expect(reset.runAt == nil)
 
             transport.enqueue(transcription("second pass"))
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in DrainCredential(profile: profile, apiKey: "k-1") })
 
             let after = try catalog.pages(revisionID: revisionID)[0]
             #expect(after.rawTranscription == "second pass")
@@ -136,9 +136,11 @@ import Testing
                                           baseURL: URL(string: "https://api.example.com/v1")!, modelID: "m")
             let (_, revisionID) = try seedRevision(in: catalog)
 
-            // First pass fails before any network call: no API key stored.
+            // First pass fails before any network call: the drain-time pair
+            // is missing (in the app this is no API key stored at drain
+            // start), so the resolver answers nil.
             let jobID = try enqueue(catalog, revisionID: revisionID)
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in nil })
             let failed = try catalog.job(id: jobID)!
             #expect(failed.state == .failed)
             #expect(failed.lastError?.contains("API key") == true)
@@ -153,7 +155,7 @@ import Testing
 
             try credentials.saveSecret("k-1", forProfileID: "p1")
             transport.enqueue(transcription("recovered text"))
-            await runner.drain(profileResolver: { _ in profile })
+            await runner.drain(profileResolver: { _ in DrainCredential(profile: profile, apiKey: "k-1") })
 
             #expect(try catalog.pages(revisionID: revisionID)[0].rawTranscription == "recovered text")
             let done = try catalog.job(id: jobID)!

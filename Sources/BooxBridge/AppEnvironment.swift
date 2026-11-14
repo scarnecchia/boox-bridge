@@ -466,13 +466,26 @@ final class AppEnvironment {
     private func spawnDrain(generation: Int) {
         let runner = OcrRunner(
             catalog: catalog, transport: URLSessionTransport(),
-            credentials: credentials, renderer: renderer, clock: clock
+            renderer: renderer, clock: clock
         )
-        let profiles = self.profiles
+        // Coherent drain-time pairing: each profile's endpoint and its API
+        // key are read together, once, before the drain starts. The resolver
+        // hands out ONLY these pairs, so saving an origin/key rotation while
+        // the drain is live can never send the old endpoint the new key (or
+        // the new endpoint the old key) — the rotation takes effect on the
+        // next drain. enqueueOCR already refused to queue pages when the key
+        // was unreadable at enqueue time; a key that becomes unreadable or
+        // missing between enqueue and drain fails those jobs visibly rather
+        // than probing with a guessed credential.
+        var snapshot: [String: DrainCredential] = [:]
+        for profile in profiles {
+            guard let key = try? credentials.secret(forProfileID: profile.id),
+                  !key.isEmpty else { continue }
+            snapshot[profile.id] = DrainCredential(profile: profile, apiKey: key)
+        }
+        let drainPairs = snapshot
         ocrTask = Task { [weak self] in
-            await runner.drain(profileResolver: { id in
-                profiles.first { $0.id == id }
-            })
+            await runner.drain(profileResolver: { id in drainPairs[id] })
             // Read cancellation inside the task: drain returns normally even
             // when cancelled, so this flag is how completion learns the run
             // ended by request rather than by an emptied queue.
