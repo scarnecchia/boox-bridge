@@ -52,6 +52,15 @@ struct ProviderSettingsTab: View {
                 }
             }
             .frame(height: 160)
+            // Inline buttons: .toolbar is not reliably rendered on a
+            // Settings-scene TabView page.
+            HStack {
+                Button { addProfile() } label: { Label("Add Provider", systemImage: "plus") }
+                Button(role: .destructive) { deleteSelected() } label: { Label("Remove", systemImage: "minus") }
+                    .disabled(selectionID == nil)
+                Spacer()
+            }
+            .padding(.horizontal).padding(.vertical, 6)
             Divider()
             editor
                 .padding()
@@ -59,19 +68,6 @@ struct ProviderSettingsTab: View {
         .onAppear { select(app.profiles.first) }
         .onChange(of: selectionID) { _, new in
             select(app.profiles.first { $0.id == new })
-        }
-        .toolbar {
-            Button {
-                addProfile()
-            } label: {
-                Label("Add", systemImage: "plus")
-            }
-            Button(role: .destructive) {
-                deleteSelected()
-            } label: {
-                Label("Remove", systemImage: "minus")
-            }
-            .disabled(selectionID == nil)
         }
     }
 
@@ -151,8 +147,13 @@ struct ProviderSettingsTab: View {
     }
 
     private func addProfile() {
-        var next = ProviderPresets.custom
-        next.displayName = "New Provider"
+        // A fresh instance each time: the shared `custom` preset carries one
+        // fixed UUID for the whole process, and duplicate ids corrupt the list.
+        var next = ProviderProfile(
+            displayName: "New Provider",
+            kind: ProviderPresets.custom.kind,
+            baseURL: ProviderPresets.custom.baseURL,
+            modelID: ProviderPresets.custom.modelID)
         app.saveProfiles(app.profiles + [next])
         select(next)
     }
@@ -165,10 +166,17 @@ struct ProviderSettingsTab: View {
     }
 
     private func saveProfile() {
-        guard let id = selectionID,
-              let url = URL(string: draftBaseURL.trimmingCharacters(in: .whitespaces)) else { return }
-        let updated = ProviderProfile(id: id, displayName: draftName, kind: draftKind,
-                                      baseURL: url, modelID: draftModel.trimmingCharacters(in: .whitespaces))
+        let url = URL(string: draftBaseURL.trimmingCharacters(in: .whitespaces))
+        guard let url, url.host != nil else {
+            app.appendActivity(title: "Provider not saved",
+                               detail: "Base URL must include a host, e.g. https://api.example.com/v1.")
+            return
+        }
+        // No selection means the editor holds a brand-new provider.
+        let id = selectionID ?? UUID().uuidString
+        let updated = ProviderProfile(id: id, displayName: draftName.trimmingCharacters(in: .whitespaces),
+                                      kind: draftKind, baseURL: url,
+                                      modelID: draftModel.trimmingCharacters(in: .whitespaces))
         // Key-host binding: a changed endpoint must never silently reuse the
         // old secret for a new host — clear it and require re-entry.
         if let previous = app.profiles.first(where: { $0.id == id }),
@@ -178,7 +186,12 @@ struct ProviderSettingsTab: View {
             app.appendActivity(title: "API key cleared",
                                detail: "Endpoint changed for \(updated.displayName) — re-enter the key for the new host.")
         }
-        app.saveProfiles(app.profiles.map { $0.id == id ? updated : $0 })
+        if app.profiles.contains(where: { $0.id == id }) {
+            app.saveProfiles(app.profiles.map { $0.id == id ? updated : $0 })
+        } else {
+            app.saveProfiles(app.profiles + [updated])
+            selectionID = id
+        }
         if !draftKey.isEmpty {
             app.storeAPIKey(draftKey, for: id)
             draftKey = ""
