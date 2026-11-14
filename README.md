@@ -1,65 +1,87 @@
-# Boox Bridge
+# BooxBridge
 
-Import auto-exported Boox notebook PDFs over USB, read them offline, and
-transcribe pages with your own vision-model provider.
+BooxBridge is a macOS app for Boox notebook users. It copies auto-exported notebook PDFs over USB into an offline library and transcribes page images with a provider you choose. Imports are one-way: BooxBridge does not delete, rename, or move files on the device during import.
 
-Boox Bridge is deliberately **non-destructive**: copying is one-way
-(device → Mac). Nothing on the Boox is ever deleted, renamed, or moved by
-a sync. First release is PDF-first — `.note` files are surfaced as
-unsupported, not faked.
+## Install and run
 
-## What it does
+BooxBridge requires **macOS 26.1 or newer**. The supported installation method is to build the app from source. There is no installer, Homebrew formula, or published release download.
 
-- **USB import** — discovers a USB-authorized Boox via your own adb,
-  imports from export folders you enroll, verifies every file with
-  metadata + SHA-256 checks before committing, and creates revisions when
-  you re-export a notebook (previous originals are always preserved).
-- **Offline library** — content-addressed originals, page previews,
-  full-text search over titles and transcripts, TXT/Markdown export with
-  your edits preserved.
-- **Transcription** — explicit, per-page, durable queue to OpenAI,
-  Anthropic, DeepInfra, Z.ai, or any OpenAI-compatible endpoint. API keys
-  stay in the Keychain; a synthetic-image Test Connection verifies the
-  exact profile+model before you spend anything.
-- **Bounded file transfers** — browse the device within your chosen
-  folder; download, create folders, and upload as explicit actions with
-  race-safe publishing.
+You need Android platform-tools, which includes **adb**, the program that connects your Mac to the Boox. BooxBridge does not bundle or download adb.
 
-## Prerequisites
+Transcription requires a provider API key, which authorizes requests to your provider account. BooxBridge supports OpenAI, Anthropic, DeepInfra, Z.ai, and OpenAI-compatible endpoints. Provider requests can incur charges. Transcription sends page images to the selected provider. BooxBridge stores API keys in the macOS Keychain.
 
-1. macOS 26.1+ (Tahoe).
-2. Android platform-tools (adb) installed by you —
-   <https://developer.android.com/tools/releases/platform-tools>. Boox
-   Bridge never bundles or downloads it.
-3. USB debugging enabled on the Boox (Settings → About → tap build →
-   Developer options), and the debugging prompt accepted.
-4. Boox PDF auto-export enabled for your notebooks. `/sdcard/note` is the
-   usual output folder on recent firmware; enroll the actual folder in
-   the app.
-5. A provider API key (OpenAI / Anthropic / DeepInfra / Z.ai). API keys
-   are not ChatGPT subscription credentials; vision requests bill against
-   the provider account. Pages leave your Mac as images when you
-   transcribe.
+**Prepare your Mac and Boox**
 
-## Building (no Xcode project needed)
+1. Complete the toolchain installation in [Developer setup](#developer-setup).
+2. Download the Mac version of [Android platform-tools](https://developer.android.com/tools/releases/platform-tools).
+3. Extract the downloaded archive.
+4. Copy this project's source folder to your Mac.
+5. Enable USB debugging on the Boox.
+6. Connect the Boox to your Mac with a USB cable.
+7. Accept the USB debugging prompt on the Boox.
+8. Enable PDF auto-export in the Boox Notes app.
 
-```sh
-make test-core   # platform-neutral tests (macOS or Linux)
-make check       # compile-only
-make test        # tests incl. macOS app target (Mac only)
-make run         # build + launch the .app
-```
+The export folder is usually `/sdcard/note`. Use the folder selected in your Boox export settings if it differs.
 
-Signing is ad-hoc by default with the hardened runtime enabled;
-non-App-Store and non-sandboxed by design (the app must spawn adb).
-`dev.booxbridge.app` is a development bundle id — replace it before
-distributing.
+**Start BooxBridge**
 
-## Developer notes
+1. Open Terminal from Applications → Utilities in Finder.
+2. Type `cd` followed by a space in Terminal.
+3. Drag the project folder from Finder into Terminal.
+4. Press Return.
 
-Documentation index: [PLAN.md](PLAN.md). Status log: [PROGRESS.md](PROGRESS.md).
-Architecture, USB/sync safety, and provider details live under [plans/](plans/).
+The project folder contains `Package.swift`, `Makefile`, and `build.sh`. The `cd` command selects that folder for subsequent commands.
 
-Boox Bridge was developed test-first on Linux (57 core tests) with macOS
-UI/device verification performed on a Mac; see PROGRESS.md for exactly
-which checks have run.
+5. Run this command:
+
+   ```sh
+   make run
+   ```
+
+The command builds BooxBridge and opens its library window. Local runs do not require a signing account. If the command reports a missing prerequisite, resolve that error before you run it again.
+
+**Import your first notebook**
+
+1. Open Settings → Device Import in BooxBridge.
+2. Click **Browse…** to select the `adb` executable inside your extracted `platform-tools` folder.
+3. Click **Verify**.
+
+A checkmark and the adb version confirm verification.
+
+4. Enter your Boox export folder in **Device folder**.
+5. Click **Enroll Current Device**.
+6. Select **Sync Now**, or press Command-S.
+
+Imported PDFs appear in the library. Automatic import also runs when the device connects, if you enable that option and leave BooxBridge open.
+
+For transcription, configure a provider profile and model in Settings → Providers. **Test Connection** checks that combination with a synthetic image, not a notebook page.
+
+To quit BooxBridge, press Command-Q.
+
+## Developer setup
+
+Install Xcode from the Mac App Store or the [Swift toolchain for macOS](https://swift.org/install/macos/). The project requires Swift 6.0 or newer and uses Swift 6 language mode. A toolchain supplies the compiler that builds the app from source.
+
+Clone this repository or copy its source folder. Open Terminal in the folder that contains `Package.swift` and `Makefile`.
+
+There is no Xcode project. `swift build` compiles the package. `./build.sh` compiles, bundles, and signs `build/BooxBridge.app`. The Makefile coordinates these steps. Swift Package Manager resolves the declared `swift-crypto` 3.x dependency. The core also uses the host SQLite library.
+
+On macOS:
+
+| Command | Purpose |
+| --- | --- |
+| `make check` | Compile without app bundling or signing. |
+| `make test` | Run the full Swift Package Manager test suite, including macOS app-target tests. |
+| `make run` | Build and open the app. |
+| `make help` | List the build and release commands. |
+
+On Linux, run `swift test` or `make test-core` to test the core. The package excludes app targets on Linux, so Linux cannot run BooxBridge. Do not use `make check` or `make test` on Linux. Their prerequisite check requires macOS. On macOS, `make test-core` runs the same suite as `make test`.
+
+BooxBridge is non-sandboxed by design because it must start the user's own adb executable. Local builds use ad-hoc signing by default with hardened runtime enabled. Replace the development bundle identifier, `dev.booxbridge.app`, before distribution.
+
+For maintainers, `make dist` builds a release package. It requires an exact `vX.Y.Z` Git tag, a Developer ID signing identity, and notarization credentials. Run `make help` for the release command list. This pipeline is not a user installation method.
+
+Read the repository guidance before changes:
+
+- [AGENTS.md](AGENTS.md): working agreements and verification requirements.
+- [SWIFTUI-RULES.md](SWIFTUI-RULES.md): SwiftUI and concurrency rules.
