@@ -6,8 +6,14 @@ import Foundation
 public enum OcrOutcome: Equatable, Sendable {
     case succeeded(text: String)
     /// retryable marks transient failures (network, 429/5xx) that the drain
-    /// loop may requeue with backoff; permanent failures are terminal.
+    /// loop may requeue with its own escalating backoff; permanent failures
+    /// are terminal.
     case failed(jobID: Int64, reason: String, retryable: Bool)
+    /// The provider itself directed a wait (a parsed Retry-After header).
+    /// The drain loop must sleep this delay instead of its local backoff —
+    /// still bounded by the configured cap. Keeping it a separate case is
+    /// what lets the delay survive from the response headers to the drain.
+    case retryAfter(jobID: Int64, reason: String, delay: TimeInterval)
     case staleDiscarded(revisionID: Int64)
 }
 
@@ -16,6 +22,9 @@ public enum OcrRunError: Error, Equatable, Sendable, CustomStringConvertible {
     case keyMissing(profileID: String)
     case endpointRejected(reason: String)
     case retryable(delay: TimeInterval, reason: String)
+    /// The provider dictated the wait (Retry-After header), distinct from
+    /// our own backoff so the drain can honor the directive verbatim.
+    case providerRetry(delay: TimeInterval, reason: String)
     case permanent(reason: String)
     case cancelled
 
@@ -25,6 +34,7 @@ public enum OcrRunError: Error, Equatable, Sendable, CustomStringConvertible {
         case .keyMissing(let p): return CredentialError.missingKey(profileID: p).description
         case .endpointRejected(let r): return r
         case .retryable(let d, let r): return "transient failure (\(r)); retry in \(Int(d))s"
+        case .providerRetry(let d, let r): return "transient failure (\(r)); provider requested a retry in \(Int(d))s"
         case .permanent(let r): return r
         case .cancelled: return "OCR cancelled"
         }
@@ -115,6 +125,12 @@ public actor OcrRunner {
             if case .retryable = error {
                 return .failed(jobID: job.id, reason: error.description, retryable: true)
             }
+            if case .providerRetry(let delay, _) = error {
+                // The delay travels in the outcome: execute() is the only
+                // place that sees the response headers, and the drain loop
+                // is the only place that decides when to requeue.
+                return .retryAfter(jobID: job.id, reason: error.description, delay: delay)
+            }
             return .failed(jobID: job.id, reason: error.description, retryable: false)
         } catch {
             return .failed(jobID: job.id, reason: String(describing: error), retryable: false)
@@ -149,20 +165,46 @@ public actor OcrRunner {
             case .failed(let jobID, let reason, let retryable):
                 let nextAttempt = job.attempts + 1
                 if retryable, nextAttempt < limits.retry.maxAttempts {
-                    let requeueDelay = RetryPolicy.backoff(attempt: job.attempts, limits: limits.retry)
-                    try? catalog.updateJob(
-                        id: jobID, state: .queued, attempts: nextAttempt,
-                        lastError: reason, at: clock.now()
+                    await requeue(
+                        jobID: jobID, nextAttempt: nextAttempt, reason: reason,
+                        delay: RetryPolicy.backoff(attempt: job.attempts, limits: limits.retry)
                     )
-                    try? await clock.sleep(for: requeueDelay)
                 } else {
-                    try? catalog.updateJob(
-                        id: jobID, state: .failed, attempts: nextAttempt,
-                        lastError: reason.isEmpty ? "failed" : reason, at: clock.now()
+                    await recordFailure(jobID: jobID, nextAttempt: nextAttempt, reason: reason)
+                }
+            case .retryAfter(let jobID, let reason, let providerDelay):
+                // The provider told us when to come back; honor that instead
+                // of the local backoff curve. The cap still applies so a
+                // hostile header cannot stall the queue indefinitely.
+                let nextAttempt = job.attempts + 1
+                if nextAttempt < limits.retry.maxAttempts {
+                    await requeue(
+                        jobID: jobID, nextAttempt: nextAttempt, reason: reason,
+                        delay: min(providerDelay, limits.retry.maxRetryAfterSeconds)
                     )
+                } else {
+                    await recordFailure(jobID: jobID, nextAttempt: nextAttempt, reason: reason)
                 }
             }
         }
+    }
+
+    /// Requeue a retryable job and wait before picking it up again. The
+    /// wait is the caller-chosen delay: local escalating backoff for our own
+    /// retry decisions, the provider-directed Retry-After when one arrived.
+    private func requeue(jobID: Int64, nextAttempt: Int, reason: String, delay: TimeInterval) async {
+        try? catalog.updateJob(
+            id: jobID, state: .queued, attempts: nextAttempt,
+            lastError: reason, at: clock.now()
+        )
+        try? await clock.sleep(for: delay)
+    }
+
+    private func recordFailure(jobID: Int64, nextAttempt: Int, reason: String) async {
+        try? catalog.updateJob(
+            id: jobID, state: .failed, attempts: nextAttempt,
+            lastError: reason.isEmpty ? "failed" : reason, at: clock.now()
+        )
     }
 
     /// The synthetic capability probe: sends ONLY the 1x1 synthetic image,
@@ -213,14 +255,24 @@ public actor OcrRunner {
                 headers: request.headers, body: request.body
             ))
             guard (200..<300).contains(response.status) else {
+                let retryAfterHeader = response.headers["retry-after"]
                 let decision = RetryPolicy.decide(
                     status: response.status,
-                    retryAfterHeader: response.headers["retry-after"],
+                    retryAfterHeader: retryAfterHeader,
                     attempt: 0,
                     limits: limits.retry
                 )
                 switch decision {
                 case .retryAfter(let delay, let reason):
+                    // A parseable Retry-After is a provider-directed wait and
+                    // must reach the drain loop verbatim (already capped) —
+                    // folding it into the local backoff would discard it.
+                    if let directed = RetryPolicy.parsedRetryAfter(retryAfterHeader) {
+                        throw OcrRunError.providerRetry(
+                            delay: min(directed, limits.retry.maxRetryAfterSeconds),
+                            reason: reason
+                        )
+                    }
                     throw OcrRunError.retryable(delay: delay, reason: reason)
                 case .fail(let reason):
                     throw OcrRunError.permanent(reason: reason)
