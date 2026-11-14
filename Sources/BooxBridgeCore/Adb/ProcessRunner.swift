@@ -83,8 +83,9 @@ public struct FoundationProcessRunner: ProcessRunning {
 
         let stdout = CappedBuffer(maxBytes: request.maxOutputBytes)
         let stderr = CappedBuffer(maxBytes: request.maxOutputBytes)
-        attach(collector: stdout, to: stdoutPipe)
-        attach(collector: stderr, to: stderrPipe)
+        let drains = DrainState()
+        attach(collector: stdout, to: stdoutPipe, drain: drains, isStdout: true)
+        attach(collector: stderr, to: stderrPipe, drain: drains, isStdout: false)
 
         do {
             try process.run()
@@ -120,6 +121,9 @@ public struct FoundationProcessRunner: ProcessRunning {
             Task.detached { box.terminate() }
         }
         watchdogTask.cancel()
+        // Drain to EOF before closing: termination can fire while handlers
+        // still hold undelivered output (a race that truncates results).
+        drains.waitForEOF(timeout: 2.0)
         closePipes(stdoutPipe, stderrPipe)
 
         if Task.isCancelled || watchdog.reason == .cancelled {
@@ -139,11 +143,12 @@ public struct FoundationProcessRunner: ProcessRunning {
         )
     }
 
-    private func attach(collector: CappedBuffer, to pipe: Pipe) {
+    private func attach(collector: CappedBuffer, to pipe: Pipe, drain: DrainState, isStdout: Bool) {
         pipe.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
             if chunk.isEmpty {
                 handle.readabilityHandler = nil
+                drain.markEOF(isStdout: isStdout)
             } else {
                 collector.feed(chunk)
             }
@@ -160,6 +165,30 @@ public struct FoundationProcessRunner: ProcessRunning {
 }
 
 // MARK: - Helpers
+
+/// Tracks EOF on both output streams so results are only finalized after
+/// every buffered byte has been captured.
+final class DrainState: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var stdoutEOF = false
+    private var stderrEOF = false
+
+    func markEOF(isStdout: Bool) {
+        condition.lock()
+        if isStdout { stdoutEOF = true } else { stderrEOF = true }
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func waitForEOF(timeout: TimeInterval) {
+        condition.lock()
+        defer { condition.unlock() }
+        let deadline = Date().addingTimeInterval(timeout)
+        while !(stdoutEOF && stderrEOF) && Date() < deadline {
+            _ = condition.wait(until: deadline)
+        }
+    }
+}
 
 /// Records why a process was killed (timeout vs caller cancellation) so the
 /// post-termination path can report the right failure. First marker wins.
