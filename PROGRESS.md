@@ -4,10 +4,10 @@ Review and delivery status for BooxBridge. Last updated: 2026-11-14.
 
 ## Current state
 
-- Branch `boox-bridge-implementation` at `88c0c27`; PR #1 is open. Merging stays with the operator (AGENTS.md).
+- Branch `boox-bridge-implementation`; PR #1 is open at the pushed head. Merging stays with the operator (AGENTS.md).
 - PR #1 review: four two-reviewer code-review fix rounds complete. Round 1 landed before `19ee661`; rounds 2–4 are the `19ee661..88c0c27` range (fix branches `fix/pr1-adb-sync`, `fix/pr1-app-ui`, `fix/pr1-ocr-core`, `fix/r2-app-lifecycle`, `fix/r2-transport`, plus the final seam fixes at `77df9ec`..`88c0c27`).
 - Tests: 111 tests in 17 suites pass on Linux (`swift test`, core only), verified 2026-11-14.
-- macOS gate outstanding: the app targets have never been compiled on this machine. Two compile defects introduced by the round-3 seams were fixed statically at `88c0c27`. `make check`, `make test`, and `make run` on a Mac remain pending (AGENTS.md "Verify your work").
+- macOS gate: the first `make check` on macOS (2026-11-14) found three type errors the static fixes at `88c0c27` missed — `NSBitmapImageRep(cgImage:)` is non-failable in the macOS 26 SDK but was still bound conditionally in `pageHashes`, and two SettingsView sites nested a double optional by calling `.map` with the failable `ProviderOrigin(url:)` initializer. All three are fixed and verified with a standalone `swiftc` replica (the `.map` shape reproduces the same diagnostic; `.flatMap` type-checks), but the fixed tree has not yet been compiled on macOS — re-run `make check`, then `make test` and `make run`, before merge (AGENTS.md "Verify your work").
 
 ## Contract and behavior changes from rounds 2–4 (`19ee661..88c0c27`)
 
