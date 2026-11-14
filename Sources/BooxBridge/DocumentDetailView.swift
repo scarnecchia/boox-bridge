@@ -108,10 +108,18 @@ struct DocumentDetailView: View {
             if document.pageCount == 0 {
                 ContentUnavailableView("No pages", systemImage: "doc.badge.ellipsis")
             } else {
-                ScrollView([.horizontal, .vertical]) {
-                    PagePreviewView(environment: app, document: document,
-                                    pageIndex: pageIndex, zoomScale: zoomScale)
-                        .accessibilityLabel("Page \(pageIndex + 1) preview")
+                // The viewport is measured OUTSIDE the two-axis ScrollView:
+                // the ScrollView never issues a viewport-derived proposal,
+                // so the fitted base size (zoom 1.0) must come from this
+                // reader rather than from the proposal or the image's
+                // intrinsic pixel size.
+                GeometryReader { geo in
+                    ScrollView([.horizontal, .vertical]) {
+                        PagePreviewView(environment: app, document: document,
+                                        pageIndex: pageIndex, zoomScale: zoomScale,
+                                        viewportSize: geo.size)
+                            .accessibilityLabel("Page \(pageIndex + 1) preview")
+                    }
                 }
                 HStack {
                     Button {
@@ -250,8 +258,10 @@ struct PagePreviewView: View {
     let environment: AppEnvironment
     let document: DocumentSummary
     let pageIndex: Int
-    /// Magnification applied by the enclosing ScrollView; 1.0 fits the pane.
+    /// Magnification applied to the viewport-fitted base size; 1.0 fits.
     var zoomScale: CGFloat = 1.0
+    /// The preview pane's scroll viewport, measured outside the ScrollView.
+    let viewportSize: CGSize
 
     @State private var image: NSImage?
 
@@ -286,6 +296,8 @@ struct PagePreviewView: View {
     struct ImageView: NSViewRepresentable {
         let image: NSImage
         var zoomScale: CGFloat = 1.0
+        /// The scroll viewport the image is fitted into at zoom 1.0.
+        let viewportSize: CGSize
 
         func makeNSView(context: Context) -> NSImageView {
             let view = NSImageView()
@@ -295,13 +307,14 @@ struct PagePreviewView: View {
         func updateNSView(_ view: NSImageView, context: Context) {
             view.image = image
         }
-        // NSImageView reports the image's pixel size as its intrinsic size,
-        // which SwiftUI would treat as a window minimum; fill the proposal
-        // instead, scaled by the zoom so the enclosing ScrollView grows and
-        // scrolls magnified content (1.0 keeps the current fit-the-pane size).
+        // The proposal is ignored on purpose: a two-axis ScrollView proposes
+        // nothing, and trusting the intrinsic pixel size made zoom 1.0 mean
+        // "image pixels", cropping large pages. The authoritative size is
+        // the viewport-fitted base times the zoom (zoom 1.0 = fit the pane,
+        // 2.0 = twice fitted), so magnified content overflows and scrolls.
         func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSImageView, context: Context) -> CGSize? {
-            let base = proposal.replacingUnspecifiedDimensions(by: nsView.image?.size ?? .zero)
-            return CGSize(width: base.width * zoomScale, height: base.height * zoomScale)
+            PreviewSizing.scaledSize(imageSize: nsView.image?.size ?? .zero,
+                                     viewport: viewportSize, zoomScale: zoomScale)
         }
     }
 }
