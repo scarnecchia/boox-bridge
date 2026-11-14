@@ -224,7 +224,7 @@ struct PagePreviewView: View {
         }
     }
 
-    private struct ImageView: NSViewRepresentable {
+    struct ImageView: NSViewRepresentable {
         let image: NSImage
         func makeNSView(context: Context) -> NSImageView {
             let view = NSImageView()
@@ -233,6 +233,11 @@ struct PagePreviewView: View {
         }
         func updateNSView(_ view: NSImageView, context: Context) {
             view.image = image
+        }
+        // NSImageView reports the image's pixel size as its intrinsic size,
+        // which SwiftUI would treat as a window minimum; fill the proposal instead.
+        func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSImageView, context: Context) -> CGSize? {
+            proposal.replacingUnspecifiedDimensions()
         }
     }
 }
